@@ -243,6 +243,10 @@ header h1 {
     overflow-y: auto;
 }
 
+.main-panel.full-width {
+    width: 100%;
+}
+
 .welcome {
     display: flex;
     align-items: center;

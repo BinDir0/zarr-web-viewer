@@ -371,9 +371,14 @@ function cleanupPreloadCache() {
 async function loadEpisodes(append = false) {
     const episodeList = document.getElementById('episodeList');
     const datasetPath = document.getElementById('datasetPath');
-    
-    if (!append) {
+    const welcomeScreen = document.getElementById('welcomeScreen');
+
+    if (!append && episodeList) {
         episodeList.innerHTML = '<div class="loading">正在随机加载未查看的 episodes...</div>';
+    }
+
+    if (!append && !episodeList && welcomeScreen) {
+        welcomeScreen.innerHTML = '<p>正在加载 Episode...</p>';
     }
     
     try {
@@ -395,63 +400,69 @@ async function loadEpisodes(append = false) {
             // 保存episodes列表用于预加载
             if (!append) {
                 allEpisodes = data.episodes;
-                episodeList.innerHTML = '';
+                if (episodeList) {
+                    episodeList.innerHTML = '';
+                }
             } else {
                 allEpisodes = allEpisodes.concat(data.episodes);
                 // 移除旧的加载更多按钮
-                const oldLoadMore = episodeList.querySelector('.load-more-container');
-                if (oldLoadMore) {
-                    oldLoadMore.remove();
+                if (episodeList) {
+                    const oldLoadMore = episodeList.querySelector('.load-more-container');
+                    if (oldLoadMore) {
+                        oldLoadMore.remove();
+                    }
                 }
             }
             
             // 直接渲染所有episodes
-            data.episodes.forEach(episode => {
-                const item = document.createElement('div');
-                item.className = 'episode-item';
-                item.innerHTML = `
-                    <div class="episode-name">
-                        <span class="dataset-badge">${episode.dataset}</span>
-                        ${episode.name}
-                    </div>
-                    <div class="episode-meta">${episode.num_frames} 帧 | #${episode.dataset_index}</div>
-                `;
-                item.dataset.episodeId = episode.id;
-                item.dataset.episodeName = episode.name;
-                item.dataset.datasetName = episode.dataset;
-                item.dataset.episodeIndex = episode.dataset_index;
-                item.addEventListener('click', () => selectEpisode(episode.id, episode.name, episode.dataset, episode.dataset_index));
-                episodeList.appendChild(item);
-            });
-            
-            // 检查是否还有未查看的数据
-            const hasUnviewed = data.datasets.some(ds => ds.unviewed_episodes > 0);
-            
-            if (hasUnviewed) {
-                // 添加"获取新批次"按钮
-                const loadMoreContainer = document.createElement('div');
-                loadMoreContainer.className = 'load-more-container';
-                loadMoreContainer.innerHTML = `
-                    <button class="load-more-btn refresh-btn" id="refreshBtn">
-                        🔄 随机获取新的一批 (${currentLimit} 个)
-                    </button>
-                    <div class="hint-text">💡 从所有数据集中随机加载 ${currentLimit} 个未被任何人查看过的 episodes</div>
-                `;
-                episodeList.appendChild(loadMoreContainer);
-                
-                document.getElementById('refreshBtn').addEventListener('click', () => {
-                    loadEpisodes(false);  // 不追加，而是替换
+            if (episodeList) {
+                data.episodes.forEach(episode => {
+                    const item = document.createElement('div');
+                    item.className = 'episode-item';
+                    item.innerHTML = `
+                        <div class="episode-name">
+                            <span class="dataset-badge">${episode.dataset}</span>
+                            ${episode.name}
+                        </div>
+                        <div class="episode-meta">${episode.num_frames} 帧 | #${episode.dataset_index}</div>
+                    `;
+                    item.dataset.episodeId = episode.id;
+                    item.dataset.episodeName = episode.name;
+                    item.dataset.datasetName = episode.dataset;
+                    item.dataset.episodeIndex = episode.dataset_index;
+                    item.addEventListener('click', () => selectEpisode(episode.id, episode.name, episode.dataset, episode.dataset_index));
+                    episodeList.appendChild(item);
                 });
-            } else {
-                // 所有都已查看
-                const noMoreContainer = document.createElement('div');
-                noMoreContainer.className = 'load-more-container';
-                noMoreContainer.innerHTML = `
-                    <div class="no-more-text">🎉 所有 episodes 都已被查看过！</div>
-                `;
-                episodeList.appendChild(noMoreContainer);
+                
+                // 检查是否还有未查看的数据
+                const hasUnviewed = data.datasets.some(ds => ds.unviewed_episodes > 0);
+                
+                if (hasUnviewed) {
+                    // 添加"获取新批次"按钮
+                    const loadMoreContainer = document.createElement('div');
+                    loadMoreContainer.className = 'load-more-container';
+                    loadMoreContainer.innerHTML = `
+                        <button class="load-more-btn refresh-btn" id="refreshBtn">
+                            🔄 随机获取新的一批 (${currentLimit} 个)
+                        </button>
+                        <div class="hint-text">💡 从所有数据集中随机加载 ${currentLimit} 个未被任何人查看过的 episodes</div>
+                    `;
+                    episodeList.appendChild(loadMoreContainer);
+                    
+                    document.getElementById('refreshBtn').addEventListener('click', () => {
+                        loadEpisodes(false);  // 不追加，而是替换
+                    });
+                } else {
+                    // 所有都已查看
+                    const noMoreContainer = document.createElement('div');
+                    noMoreContainer.className = 'load-more-container';
+                    noMoreContainer.innerHTML = `
+                        <div class="no-more-text">🎉 所有 episodes 都已被查看过！</div>
+                    `;
+                    episodeList.appendChild(noMoreContainer);
+                }
             }
-        } else if (!append) {
+        } else if (!append && episodeList) {
             episodeList.innerHTML = '<div class="loading">未找到任何 episode</div>';
         }
         
@@ -470,13 +481,20 @@ async function loadEpisodes(append = false) {
                     startTranslationPreload();
                 }, 3000); // 延迟3秒后启动翻译预加载
             }, 1000); // 延迟1秒，确保页面渲染完成
+
+            if (!episodeList && !currentEpisodeId) {
+                const first = allEpisodes[0];
+                selectEpisode(first.id, first.name, first.dataset, first.dataset_index);
+            }
         } else {
             console.warn('⚠️ allEpisodes 为空，无法启动预加载');
         }
         
     } catch (error) {
         console.error('加载episodes失败:', error);
-        episodeList.innerHTML = '<div class="loading">加载失败，请检查配置</div>';
+        if (episodeList) {
+            episodeList.innerHTML = '<div class="loading">加载失败，请检查配置</div>';
+        }
     }
 }
 
@@ -588,7 +606,7 @@ async function selectEpisode(episodeId, episodeName, datasetName, episodeIndex) 
         index: episodeIndex
     };
     
-    // 更新选中状态
+    // 更新选中状态（无侧边栏时可为空）
     document.querySelectorAll('.episode-item').forEach(item => {
         if (item.dataset.episodeId === episodeId) {
             item.classList.add('active');
