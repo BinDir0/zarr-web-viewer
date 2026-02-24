@@ -1,0 +1,32 @@
+# Zarr 数据集查看器配置文件
+
+# 方式1: 单个数据集（保持向后兼容）
+# zarr_dataset_path: /path/to/your/zarr/dataset
+
+# 方式2: 多个数据集（推荐）
+zarr_datasets:
+  - name: "EgoDex"
+    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
+    enabled: true
+  - name: "TACO"
+    path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
+    enabled: true
+  - name: "OakInk-v2"
+    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_filtered_v1.zarr
+    enabled: true
+  - name: "HoloAssist"
+    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
+    enabled: true
+  # - name: "Epic"
+  #   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_clean.zarr
+  #   enabled: true
+  # - name: "Ego4d-Cooking"
+  #   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_clean_batch.zarr
+  #   enabled: true
+  # - name: "Ego4d-Other"
+  #   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_clean_batch.zarr
+  #   enabled: true
+
+server_port: 9472
+debug_mode: true
+

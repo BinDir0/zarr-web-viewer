@@ -1,0 +1,40 @@
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Video cache (if any)
+video_cache/
+*.mp4
+*.avi
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+.cache/

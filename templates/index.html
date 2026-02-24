@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <title>Zarr 数据集查看器</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <header>
+        <h1>Zarr 数据集查看器</h1>
+        <div class="header-info">
+            <span id="datasetPath">数据集路径: 加载中...</span>
+            <span id="preloadStatus" style="margin-left: 20px; color: #2196F3;"></span>
+        </div>
+    </header>
+
+    <div class="layout">
+        <!-- 左侧边栏 - Episode列表 -->
+        <aside class="sidebar">
+            <h2>Episodes</h2>
+            <div class="episode-list" id="episodeList">
+                <div class="loading">加载中...</div>
+            </div>
+        </aside>
+
+        <!-- 主面板 - 显示选中的episode -->
+        <section class="main-panel">
+            <div class="welcome" id="welcomeScreen">
+                <p>👈 请从左侧选择一个 Episode 开始查看</p>
+            </div>
+
+            <div class="episode-detail" id="episodeDetail" style="display: none;">
+                <div class="detail-header">
+                    <h2 id="episodeTitle">Episode: </h2>
+                    <div class="episode-info" id="episodeInfo"></div>
+                </div>
+
+                <!-- 视频显示区域 -->
+                <div class="frames-section">
+                    <h3>Episode 视频</h3>
+                    <div class="frames-grid" id="framesGrid">
+                        <!-- 动态生成视频播放器 -->
+                    </div>
+                </div>
+
+                <!-- 标注编辑区域 -->
+                <div class="annotation-section">
+                    <h3>Episode 质量评估</h3>
+                    
+                    <!-- 问题类型选择 -->
+                    <div class="issues-checkboxes">
+                        <p class="issues-label">❌ 丢弃原因（勾选存在的问题）：</p>
+                        <label class="checkbox-item">
+                            <input type="checkbox" name="issue" value="动作标注不佳">
+                            <span>动作标注不佳（不缺手但是动作标注不准确）</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" name="issue" value="缺手">
+                            <span>缺手（画面中手部缺失，包括一只手全程不出现，或者手超出画面之外且动作标注没有跟上）</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" name="issue" value="遮挡严重">
+                            <span>遮挡严重（手部被遮挡，导致动作标注消失或不合理）</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" name="issue" value="其他问题">
+                            <span>其他问题（请在下方说明）</span>
+                        </label>
+                    </div>
+                    
+                    <!-- 额外说明 -->
+                    <div class="additional-notes">
+                        <label for="additionalNotes">📝 额外说明（可选）：</label>
+                        <textarea id="additionalNotes" placeholder="补充说明具体问题..." rows="3"></textarea>
+                    </div>
+                    
+                    <!-- 提交按钮和状态 -->
+                    <div class="annotation-actions">
+                        <button id="saveAnnotation" class="btn-primary">提交评估</button>
+                        <span id="annotationStatus" class="status-message"></span>
+                    </div>
+                    
+                    <div class="annotation-hint">
+                        💡 提示：如果不勾选任何问题，表示此 Episode <strong>质量良好，可以使用</strong>。
+                    </div>
+                    
+                    <!-- Episode 导航按钮 -->
+                    <div class="episode-navigation-bottom">
+                        <button id="prevEpisodeBtn" class="nav-btn" title="上一个 Episode (←)">← 上一个</button>
+                        <button id="nextEpisodeBtn" class="nav-btn" title="下一个 Episode (→)">下一个 →</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
+
