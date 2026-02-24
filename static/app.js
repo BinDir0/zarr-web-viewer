@@ -53,6 +53,15 @@ function setupEventListeners() {
     if (saveButton) {
         saveButton.addEventListener('click', saveAnnotation);
     }
+
+    const toggleRendered = document.getElementById('toggleRendered');
+    if (toggleRendered) {
+        toggleRendered.addEventListener('change', () => {
+            if (currentEpisodeId) {
+                renderVideos(currentEpisodeId);
+            }
+        });
+    }
     
     // 上一个/下一个按钮
     const prevBtn = document.getElementById('prevEpisodeBtn');
@@ -63,11 +72,40 @@ function setupEventListeners() {
     if (nextBtn) {
         nextBtn.addEventListener('click', navigateToNextEpisode);
     }
-    
-    // 键盘快捷键：左右箭头
+
+    let spaceHeld = false;
+
+    function updateSpaceOverlayVisibility() {
+        // 按住空格时临时隐藏投影（如果 toggleRendered 当前开启）
+        if (!toggleRendered || !currentEpisodeId) return;
+        if (!toggleRendered.checked) return;
+        if (!spaceHeld) return;
+
+        // 空格按住时显示原始帧（相当于临时取消投影）
+        const imgs = document.querySelectorAll('#framesGrid img');
+        imgs.forEach((img) => {
+            const url = new URL(img.src, window.location.origin);
+            if (url.pathname.includes('/frame/rendered')) {
+                url.pathname = url.pathname.replace('/frame/rendered', '/frame/original');
+                img.src = url.toString();
+            }
+        });
+    }
+
+    // 键盘快捷键：左右箭头 / 空格按住隐藏
     document.addEventListener('keydown', (e) => {
         // 如果正在输入文本，不触发快捷键
         if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') {
+            return;
+        }
+
+        if (e.key === ' ') {
+            // 防止页面滚动
+            e.preventDefault();
+            if (!spaceHeld) {
+                spaceHeld = true;
+                updateSpaceOverlayVisibility();
+            }
             return;
         }
         
@@ -77,6 +115,19 @@ function setupEventListeners() {
         } else if (e.key === 'ArrowRight') {
             e.preventDefault();
             navigateToNextEpisode();
+        }
+    });
+
+    document.addEventListener('keyup', (e) => {
+        if (e.key === ' ') {
+            e.preventDefault();
+            if (spaceHeld) {
+                spaceHeld = false;
+                // 释放空格：恢复当前 toggle 状态
+                if (currentEpisodeId) {
+                    renderVideos(currentEpisodeId);
+                }
+            }
         }
     });
 }
@@ -599,81 +650,33 @@ async function loadEpisodeDetail(episodeId) {
     }
 }
 
-// 渲染视频
+// 渲染抽帧视图（6 帧等距抽取）
 function renderVideos(episodeId) {
     const framesGrid = document.getElementById('framesGrid');
-    
+    const toggle = document.getElementById('toggleRendered');
+    const showRendered = toggle ? toggle.checked : true;
+
     framesGrid.innerHTML = '';
-    
-    // 创建原始视频卡片
-    const originalCard = document.createElement('div');
-    originalCard.className = 'frame-card';
-    originalCard.innerHTML = `
-        <h4>原始视频</h4>
-        <video id="video-original" controls preload="metadata" style="width: 100%; border-radius: 6px;">
-            <source src="/api/episode/${episodeId}/video/original" type="video/mp4">
-            您的浏览器不支持视频播放。
-        </video>
-        <div id="video-original-status" style="color: #666; font-size: 12px; margin-top: 5px;">加载中...</div>
-    `;
-    framesGrid.appendChild(originalCard);
-    
-    // 创建渲染视频卡片
-    const renderedCard = document.createElement('div');
-    renderedCard.className = 'frame-card';
-    renderedCard.innerHTML = `
-        <h4>手部动作渲染视频</h4>
-        <video id="video-rendered" controls preload="metadata" style="width: 100%; border-radius: 6px;">
-            <source src="/api/episode/${episodeId}/video/rendered" type="video/mp4">
-            您的浏览器不支持视频播放。
-        </video>
-        <div id="video-rendered-status" style="color: #666; font-size: 12px; margin-top: 5px;">加载中...</div>
-    `;
-    framesGrid.appendChild(renderedCard);
-    
-    // 添加视频加载事件监听（使用 setTimeout 确保元素已添加到 DOM）
-    setTimeout(() => {
-        const videoOriginal = document.getElementById('video-original');
-        const videoRendered = document.getElementById('video-rendered');
-        const statusOriginal = document.getElementById('video-original-status');
-        const statusRendered = document.getElementById('video-rendered-status');
-        
-        if (videoOriginal) {
-            videoOriginal.addEventListener('loadedmetadata', () => {
-                statusOriginal.textContent = `✓ 视频已加载 (${videoOriginal.duration.toFixed(1)}秒)`;
-                statusOriginal.style.color = '#4CAF50';
-            });
-            
-            videoOriginal.addEventListener('error', (e) => {
-                console.error('原始视频加载错误:', e, videoOriginal.error);
-                statusOriginal.textContent = `✗ 视频加载失败: ${videoOriginal.error?.message || '未知错误'}`;
-                statusOriginal.style.color = '#f44336';
-            });
-            
-            videoOriginal.addEventListener('loadstart', () => {
-                statusOriginal.textContent = '正在加载视频...';
-                statusOriginal.style.color = '#2196F3';
-            });
-        }
-        
-        if (videoRendered) {
-            videoRendered.addEventListener('loadedmetadata', () => {
-                statusRendered.textContent = `✓ 视频已加载 (${videoRendered.duration.toFixed(1)}秒)`;
-                statusRendered.style.color = '#4CAF50';
-            });
-            
-            videoRendered.addEventListener('error', (e) => {
-                console.error('渲染视频加载错误:', e, videoRendered.error);
-                statusRendered.textContent = `✗ 视频加载失败: ${videoRendered.error?.message || '未知错误'}`;
-                statusRendered.style.color = '#f44336';
-            });
-            
-            videoRendered.addEventListener('loadstart', () => {
-                statusRendered.textContent = '正在加载视频...';
-                statusRendered.style.color = '#2196F3';
-            });
-        }
-    }, 100);
+
+    const strip = document.createElement('div');
+    strip.className = 'frames-strip';
+
+    for (let i = 0; i < 6; i++) {
+        const tile = document.createElement('div');
+        tile.className = 'frame-tile';
+
+        const img = document.createElement('img');
+        img.alt = `frame_${i}`;
+        // 叠加投影 / 原始帧 二选一
+        img.src = showRendered
+            ? `/api/episode/${episodeId}/frame/rendered?i=${i}&n=6`
+            : `/api/episode/${episodeId}/frame/original?i=${i}&n=6`;
+
+        tile.appendChild(img);
+        strip.appendChild(tile);
+    }
+
+    framesGrid.appendChild(strip);
 }
 
 // 显示指令信息
