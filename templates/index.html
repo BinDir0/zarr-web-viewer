@@ -38,8 +38,17 @@
                 <!-- 视频显示区域 -->
                 <div class="frames-section">
                     <h3>Episode 视频</h3>
+
+                    <div class="frames-controls">
+                        <label class="checkbox-item inline">
+                            <input type="checkbox" id="toggleRendered" checked>
+                            <span>显示动作投影（按住空格临时隐藏）</span>
+                        </label>
+                        <span class="hint">显示 6 帧等距抽帧（用于快速审核）</span>
+                    </div>
+
                     <div class="frames-grid" id="framesGrid">
-                        <!-- 动态生成视频播放器 -->
+                        <!-- 动态生成抽帧视图 -->
                     </div>
                 </div>
 
@@ -65,6 +74,14 @@
                         <label class="checkbox-item">
                             <input type="checkbox" name="issue" value="其他问题">
                             <span>其他问题（请在下方说明）</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" name="issue" value="无法判断语言是否精准">
+                            <span>无法判断语言是否精准（仅凭抽帧无法判断）</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" name="issue" value="语言明显错误">
+                            <span>语言明显错误（仅凭抽帧即可判断）</span>
                         </label>
                     </div>
                     

@@ -1811,20 +1811,118 @@ def api_episode_video_original(episode_id: str):
     return response
 
 
-@app.route("/api/episode/<path:episode_id>/video/rendered", methods=["GET"])
-def api_episode_video_rendered(episode_id: str):
-    """生成并返回带手部渲染的视频"""
+@app.route("/api/episode/<path:episode_id>/frame/original", methods=["GET"])
+def api_episode_frame_original(episode_id: str):
+    """返回单帧原图（等距抽帧，默认 6 帧）。"""
     episode_data = get_episode_data(episode_id)
-    
     if episode_data is None:
         abort(404, "Episode not found")
-    
+
     images = episode_data.get("images")
     if images is None or len(images) == 0:
         abort(404, "No images found for this episode")
-    
-    # 检测是否是 EgoDex 数据集（跳过 MANO 渲染）
-    is_egodex = "egodex" in episode_id.lower()
+
+    i = request.args.get("i", default=0, type=int)
+    n = request.args.get("n", default=6, type=int)
+    if n < 1:
+        n = 1
+    i = max(0, min(i, n - 1))
+
+    total = len(images)
+    if total == 1:
+        idx = 0
+    else:
+        idx = int(round(i * (total - 1) / (n - 1))) if n > 1 else total // 2
+
+    frame = images[idx]
+    # images 通常是 BGR (OpenCV)；转成 RGB 方便 PIL 编码
+    if isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.shape[2] == 3:
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    else:
+        frame_rgb = frame
+
+    img = Image.fromarray(frame_rgb)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/jpeg")
+
+
+@app.route("/api/episode/<path:episode_id>/frame/rendered", methods=["GET"])
+def api_episode_frame_rendered(episode_id: str):
+    """返回单帧叠加动作投影图（等距抽帧，默认 6 帧）。
+
+    复用现有渲染逻辑：render_hand_on_frame。
+    """
+    episode_data = get_episode_data(episode_id)
+    if episode_data is None:
+        abort(404, "Episode not found")
+
+    images = episode_data.get("images")
+    if images is None or len(images) == 0:
+        abort(404, "No images found for this episode")
+
+    i = request.args.get("i", default=0, type=int)
+    n = request.args.get("n", default=6, type=int)
+    if n < 1:
+        n = 1
+    i = max(0, min(i, n - 1))
+
+    total = len(images)
+    if total == 1:
+        idx = 0
+    else:
+        idx = int(round(i * (total - 1) / (n - 1))) if n > 1 else total // 2
+
+    frame = images[idx]
+
+    # 尝试读取同帧对应的 mano/wrist/extrinsic/intrinsic（如果存在）
+    mano_params = None
+    wrist_params = None
+    extrinsic = None
+    intrinsic = None
+
+    if "mano_params" in episode_data and episode_data["mano_params"] is not None:
+        try:
+            mano_params = episode_data["mano_params"][idx]
+        except Exception:
+            mano_params = None
+    if "wrist" in episode_data and episode_data["wrist"] is not None:
+        try:
+            wrist_params = episode_data["wrist"][idx]
+        except Exception:
+            wrist_params = None
+    if "extrinsic" in episode_data and episode_data["extrinsic"] is not None:
+        try:
+            extrinsic = episode_data["extrinsic"][idx]
+        except Exception:
+            extrinsic = None
+    if "intrinsic" in episode_data and episode_data["intrinsic"] is not None:
+        try:
+            intrinsic = episode_data["intrinsic"][idx]
+        except Exception:
+            intrinsic = None
+
+    rendered = render_hand_on_frame(
+        frame,
+        mano_params=mano_params,
+        wrist_params=wrist_params,
+        extrinsic=extrinsic,
+        intrinsic=intrinsic,
+        alpha=0.55,  # 叠加半透明
+    )
+
+    # render_hand_on_frame 返回 BGR
+    if isinstance(rendered, np.ndarray) and rendered.ndim == 3 and rendered.shape[2] == 3:
+        rendered_rgb = cv2.cvtColor(rendered, cv2.COLOR_BGR2RGB)
+    else:
+        rendered_rgb = rendered
+
+    img = Image.fromarray(rendered_rgb)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/jpeg")
     if is_egodex:
         print(f"检测到 EgoDex 数据集，将跳过 MANO 渲染，仅渲染 fingertips")
     
