@@ -888,6 +888,8 @@ def convert_video_to_h264(input_path: str, output_path: str, quality_mode: str =
     import subprocess
     
     try:
+        # 所有模式都使用 -g 1（每帧关键帧），让浏览器 seek 即时响应
+        # 文件会稍大，但这些视频很短（~5s），影响可忽略
         if quality_mode == 'fast':
             # 快速模式：原始视频使用
             cmd = [
@@ -896,6 +898,7 @@ def convert_video_to_h264(input_path: str, output_path: str, quality_mode: str =
                 '-c:v', 'libx264',
                 '-preset', 'fast',
                 '-crf', '25',
+                '-g', '1', '-keyint_min', '1',
                 '-pix_fmt', 'yuv420p',
                 '-movflags', '+faststart',
                 '-y',
@@ -909,6 +912,7 @@ def convert_video_to_h264(input_path: str, output_path: str, quality_mode: str =
                 '-c:v', 'libx264',
                 '-preset', 'medium',     # 更好的质量
                 '-crf', '20',            # 高质量
+                '-g', '1', '-keyint_min', '1',
                 '-pix_fmt', 'yuv420p',
                 '-movflags', '+faststart',
                 '-y',
@@ -921,6 +925,7 @@ def convert_video_to_h264(input_path: str, output_path: str, quality_mode: str =
                 '-c:v', 'libx264',
                 '-preset', 'fast',
                 '-crf', '23',
+                '-g', '1', '-keyint_min', '1',
                 '-pix_fmt', 'yuv420p',
                 '-movflags', '+faststart',
                 '-y',

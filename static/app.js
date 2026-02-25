@@ -724,16 +724,30 @@ function renderVideos(episodeId) {
     timeLabel.className = 'scrub-time-label';
     timeLabel.textContent = '0:00 / 0:00';
 
+    // 速度切换按钮
+    const speeds = [1, 2, 4, 8];
+    let speedIdx = 0;
+    const speedBtn = document.createElement('button');
+    speedBtn.className = 'speed-btn';
+    speedBtn.textContent = '1x';
+    speedBtn.title = '点击切换播放速度';
+    speedBtn.addEventListener('click', () => {
+        speedIdx = (speedIdx + 1) % speeds.length;
+        const spd = speeds[speedIdx];
+        speedBtn.textContent = `${spd}x`;
+        originalVideo.playbackRate = spd;
+        renderedVideo.playbackRate = spd;
+    });
+
     // 状态
     let isScrubbing = false;
     let wasPlayingBeforeScrub = false;
     let videoDuration = 0; // 真实时长（秒），由 loadedmetadata 设置
 
-    // seek 节流状态：快速拖拽时避免 seek 请求堆积导致画面卡死
+    // seek 节流状态：每帧关键帧视频 seek 很快，用简单 rAF 节流即可
     let _seekPending = false;   // 是否有待执行的 seek
     let _seekTarget = 0;        // 待 seek 的目标时间
     let _rafId = null;          // requestAnimationFrame id
-    let _isSeeking = false;     // 浏览器是否正在 seek 中
 
     function formatTime(s) {
         const m = Math.floor(s / 60);
@@ -755,10 +769,9 @@ function renderVideos(episodeId) {
         return Math.round(t * 100);
     }
 
-    // 真正执行 seek 的内部函数（不节流）
+    // 真正执行 seek 的内部函数
     function _doSeek(timeSec) {
         timeSec = Math.max(0, Math.min(timeSec, videoDuration));
-        _isSeeking = true;
         originalVideo.currentTime = Math.min(timeSec, originalVideo.duration || videoDuration);
         if (renderedVideo.duration && isFinite(renderedVideo.duration)) {
             renderedVideo.currentTime = Math.min(timeSec, renderedVideo.duration);
@@ -766,55 +779,36 @@ function renderVideos(episodeId) {
         updateTimeLabel(timeSec, videoDuration);
     }
 
-    // 节流 seek：拖拽时通过 rAF 合并，且等上一次 seek 完成后才发起下一次
+    // 节流 seek：拖拽时通过 rAF 合并，每帧最多 seek 一次
     function seekBothVideos(timeSec) {
         if (!isScrubbing) {
             // 非拖拽状态（如松开时的最终 seek），直接执行
             _doSeek(timeSec);
             return;
         }
-        // 拖拽中：记录目标，用 rAF 节流
+        // 拖拽中：记录目标，用 rAF 节流（每帧关键帧视频不需要等 seeked）
         _seekTarget = timeSec;
-        updateTimeLabel(timeSec, videoDuration); // 时间标签立即更新，保持响应感
+        updateTimeLabel(timeSec, videoDuration); // 时间标签立即更新
         if (!_seekPending) {
             _seekPending = true;
             _rafId = requestAnimationFrame(() => {
                 _seekPending = false;
                 _rafId = null;
-                if (!_isSeeking) {
-                    _doSeek(_seekTarget);
-                }
-                // 如果正在 seeking，seeked 回调会处理排队的 seek
+                _doSeek(_seekTarget);
             });
         }
     }
 
-    // 当 seek 完成后，如果还有排队的 seek 目标，继续执行
-    function _onSeeked() {
-        _isSeeking = false;
-        if (isScrubbing && _seekPending) {
-            // rAF 已经排了，让它处理
-        } else if (isScrubbing) {
-            // 没有 rAF 排队，但可能 _seekTarget 已经更新了（在 seeking 期间拖拽了新位置）
-            const currentTarget = _seekTarget;
-            const currentPos = originalVideo.currentTime;
-            if (Math.abs(currentTarget - currentPos) > 0.02) {
-                _doSeek(currentTarget);
-            }
-        }
-    }
-    originalVideo.addEventListener('seeked', _onSeeked);
-
     // ---- loadedmetadata: 用真实 duration 初始化 scrubber ----
     originalVideo.addEventListener('loadedmetadata', () => {
-        originalVideo.playbackRate = 1.0;
+        originalVideo.playbackRate = speeds[speedIdx];
         videoDuration = originalVideo.duration;
         scrubber.max = String(timeToScrubber(videoDuration));
         scrubber.value = '0';
         updateTimeLabel(0, videoDuration);
     });
     renderedVideo.addEventListener('loadedmetadata', () => {
-        renderedVideo.playbackRate = 1.0;
+        renderedVideo.playbackRate = speeds[speedIdx];
     });
 
     // ---- 拖拽开始：暂停视频，标记 scrubbing ----
@@ -857,7 +851,6 @@ function renderVideos(episodeId) {
     // 清理函数，下次 renderVideos 时调用
     window._scrubCleanup = () => {
         document.removeEventListener('mouseup', docMouseUp);
-        originalVideo.removeEventListener('seeked', _onSeeked);
         if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
     };
 
@@ -890,7 +883,14 @@ function renderVideos(episodeId) {
     const container = document.createElement('div');
     container.className = 'video-scrub-container';
     container.appendChild(flexRow);
-    container.appendChild(scrubber);
+
+    // 进度条 + 速度按钮行
+    const controlsRow = document.createElement('div');
+    controlsRow.className = 'scrub-controls-row';
+    controlsRow.appendChild(scrubber);
+    controlsRow.appendChild(speedBtn);
+    container.appendChild(controlsRow);
+
     container.appendChild(timeLabel);
     framesGrid.appendChild(container);
 }
