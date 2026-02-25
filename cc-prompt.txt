@@ -1,0 +1,19 @@
+修改 zarr-web-viewer 的视频 scrubbing 布局：从 overlay（rendered 叠在 original 上）改为左右并排（side-by-side）模式，方便同时对比。
+
+需要改的文件：static/app.js 和 static/styles.css
+
+具体要求：
+1. renderVideos() 中，把 originalVideo 和 renderedVideo 放在一个 flexbox 行容器里，各占 50% 宽度，左边 original 右边 rendered
+2. 当 toggle 关闭（不显示 rendered）时，original 独占 100% 宽度
+3. 空格键临时隐藏 rendered 时同理——rendered display:none，original 自动撑满（用 flex:1 实现）
+4. 进度条（scrubber）和时间标签放在两个视频下方，横跨整个容器宽度
+5. CSS：去掉 .scrub-video-rendered 的 absolute 定位，改为 flex 布局。两个视频上方各加一个小标签（"Original" / "Rendered"），用半透明背景 absolute 定位在视频左上角
+6. 保持现有的 scrub 同步逻辑、preloadedVideos 缓存复用不变
+7. 视频容器加个最大高度限制（60vh），避免视频太大撑爆页面
+
+注意：
+- renderedVideo 的 id="renderedVideoContainer" 要保留，updateSpaceOverlayVisibility() 依赖它
+- 但现在 renderedVideoContainer 应该是包裹 rendered 视频的 wrapper div（不是 video 元素本身），这样隐藏时 flex 布局能正确收缩
+- 不要改 updateSpaceOverlayVisibility() 的逻辑，只需确保 getElementById('renderedVideoContainer') 能找到正确的元素
+
+只改 static/app.js 和 static/styles.css，不要动其他文件。

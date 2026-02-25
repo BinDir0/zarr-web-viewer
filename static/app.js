@@ -196,19 +196,19 @@ async function preloadVideo(episodeId) {
         originalVideo.src = originalUrl;
         renderedVideo.src = renderedUrl;
         
-        // 等待两个视频都加载完成
-        await Promise.all([
-            new Promise((resolve, reject) => {
-                originalVideo.addEventListener('loadeddata', resolve, { once: true });
-                originalVideo.addEventListener('error', reject, { once: true });
-                originalVideo.load();
-            }),
-            new Promise((resolve, reject) => {
-                renderedVideo.addEventListener('loadeddata', resolve, { once: true });
-                renderedVideo.addEventListener('error', reject, { once: true });
-                renderedVideo.load();
-            })
-        ]);
+        // 等待视频加载（rendered 可能需要后端渲染，允许失败）
+        const originalPromise = new Promise((resolve, reject) => {
+            originalVideo.addEventListener('loadeddata', resolve, { once: true });
+            originalVideo.addEventListener('error', reject, { once: true });
+            originalVideo.load();
+        });
+        const renderedPromise = new Promise((resolve, reject) => {
+            renderedVideo.addEventListener('loadeddata', resolve, { once: true });
+            renderedVideo.addEventListener('error', () => resolve('rendered_failed'), { once: true });
+            renderedVideo.load();
+        });
+
+        await Promise.all([originalPromise, renderedPromise]);
         
         // 标记为已预加载
         preloadedVideos.set(episodeId, {
@@ -705,9 +705,18 @@ function renderVideos(episodeId) {
     renderedWrapper.id = 'renderedVideoContainer';
     const renderedLabel = document.createElement('div');
     renderedLabel.className = 'video-label';
-    renderedLabel.textContent = 'Rendered';
+    renderedLabel.textContent = 'Rendered (加载中...)';
     renderedWrapper.appendChild(renderedLabel);
     renderedWrapper.appendChild(renderedVideo);
+
+    // Rendered 视频加载状态
+    renderedVideo.addEventListener('loadeddata', () => {
+        renderedLabel.textContent = 'Rendered';
+    });
+    renderedVideo.addEventListener('error', () => {
+        renderedLabel.textContent = 'Rendered (加载失败)';
+        renderedLabel.style.color = '#f44336';
+    });
 
     flexRow.appendChild(originalWrapper);
     flexRow.appendChild(renderedWrapper);
@@ -733,10 +742,12 @@ function renderVideos(episodeId) {
         // 获取当前 DOM 中的所有 scrub-video（支持 reloadedVideos 场景）
         const videos = framesGrid.querySelectorAll('.scrub-video');
         let dur = 0;
-        videos.forEach(v => { if (v.duration && isFinite(v.duration)) dur = v.duration; });
+        videos.forEach(v => { if (v.duration && isFinite(v.duration)) dur = Math.max(dur, v.duration); });
         if (!dur) return;
+        // clamp ratio to [0, 1] and avoid seeking past the last decodable frame
+        ratio = Math.max(0, Math.min(1, ratio));
         const t = ratio * dur;
-        videos.forEach(v => { v.currentTime = t; });
+        videos.forEach(v => { v.currentTime = Math.min(t, v.duration || dur); });
         updateTimeLabel(t, dur);
     }
 

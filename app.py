@@ -1923,20 +1923,34 @@ def api_episode_frame_rendered(episode_id: str):
     img.save(buf, format="JPEG", quality=85)
     buf.seek(0)
     return send_file(buf, mimetype="image/jpeg")
+
+
+@app.route("/api/episode/<path:episode_id>/video/rendered", methods=["GET"])
+def api_episode_video_rendered(episode_id: str):
+    """生成并返回带动作投影的渲染视频"""
+    episode_data = get_episode_data(episode_id)
+    if episode_data is None:
+        abort(404, "Episode not found")
+
+    images = episode_data.get("images")
+    if images is None or len(images) == 0:
+        abort(404, "No images found for this episode")
+
+    is_egodex = episode_id.startswith("EgoDex")
     if is_egodex:
         print(f"检测到 EgoDex 数据集，将跳过 MANO 渲染，仅渲染 fingertips")
-    
+
     # 使用固定路径的缓存文件
     cache_dir = "/DATA/guantianrui/tmp/zarr_video_cache"
     os.makedirs(cache_dir, exist_ok=True)
-    
+
     # 清理过期和过大的缓存
     cleanup_video_cache(cache_dir, max_size_gb=10.0, max_age_days=7)
-    
+
     import hashlib
     video_hash = hashlib.md5(f"{episode_id}_rendered".encode()).hexdigest()
     video_path = os.path.join(cache_dir, f"{video_hash}.mp4")
-    
+
     # 如果缓存文件存在，直接返回
     if os.path.exists(video_path):
         print(f"使用缓存的渲染视频: {video_path}")
@@ -1947,17 +1961,16 @@ def api_episode_frame_rendered(episode_id: str):
             conditional=True,
             download_name=f"{episode_data.get('name', 'episode')}_rendered.mp4"
         )
-        # 添加缓存头：缓存1小时
         response.headers['Cache-Control'] = 'public, max-age=3600'
         return response
-    
+
     # 准备渲染数据
     state_data = episode_data.get("state", {})
     action_data = episode_data.get("action", {})
     presence_data = episode_data.get("presence")
     intrinsic_data = episode_data.get("intrinsic")
     extrinsic_data = episode_data.get("extrinsic")
-    
+
     # 初始化MANO模型（如果可用）
     mano_layers = None
     if MANO_AVAILABLE:
@@ -1966,45 +1979,40 @@ def api_episode_frame_rendered(episode_id: str):
             if os.path.exists(mano_root):
                 from manopth.manolayer import ManoLayer
                 mano_layers = {
-                    'left': ManoLayer(mano_root=mano_root, use_pca=True, ncomps=45, 
+                    'left': ManoLayer(mano_root=mano_root, use_pca=True, ncomps=45,
                                      flat_hand_mean=True, side='left', center_idx=0),
-                    'right': ManoLayer(mano_root=mano_root, use_pca=True, ncomps=45, 
+                    'right': ManoLayer(mano_root=mano_root, use_pca=True, ncomps=45,
                                       flat_hand_mean=True, side='right', center_idx=0)
                 }
                 print("✓ MANO 模型已初始化用于视频渲染")
         except Exception as e:
             print(f"⚠️  MANO 初始化失败，使用简化渲染: {e}")
             mano_layers = None
-    
+
     # 生成渲染视频
     try:
         print(f"开始生成渲染视频: {episode_id} ({len(images)} 帧)")
-        
-        # 并行渲染所有帧（加速）
+
         from concurrent.futures import ThreadPoolExecutor
         import time
-        
+
         num_frames = len(images)
         print(f"准备并行渲染 {num_frames} 帧...")
         start_time = time.time()
-        
+
         def render_single_frame(i):
             """渲染单帧的辅助函数"""
             frame = images[i]
-            
-            # 准备当前帧的MANO参数（从state读取，EgoDex跳过）
+
             mano_params = None
             if "mano" in state_data and not is_egodex:
                 mano = state_data["mano"][i]
-                
-                # 按照 visualize_episode_video.py 的方式处理
                 pose_dim = mano.shape[0] // 2
                 mano_params = {
                     "left": mano[:pose_dim],
                     "right": mano[pose_dim:],
                 }
-            
-            # 准备手腕参数（从state读取，EgoDex跳过）
+
             wrist_params = None
             if "wrist" in state_data and not is_egodex:
                 wrist = state_data["wrist"][i]
@@ -2014,8 +2022,7 @@ def api_episode_frame_rendered(episode_id: str):
                     "left_rotation": wrist[6:12],
                     "right_rotation": wrist[12:18],
                 }
-            
-            # 准备形状参数（EgoDex跳过）
+
             shape_params = None
             if "shape" in state_data and not is_egodex:
                 shape = state_data["shape"][i]
@@ -2023,31 +2030,27 @@ def api_episode_frame_rendered(episode_id: str):
                     "left": shape[:10],
                     "right": shape[10:20],
                 }
-            
-            # 获取presence
+
             presence = None
             if presence_data is not None:
                 presence = int(presence_data[i])
-            
-            # 获取相机参数
+
             intrinsic = None
             if intrinsic_data is not None:
                 intrinsic = intrinsic_data[i]
-            
+
             extrinsic = None
             if extrinsic_data is not None:
                 extrinsic = extrinsic_data[i]
-            
-            # 准备fingertips数据（从state中读取）
+
             fingertips = None
             if "fingertips" in state_data:
                 tips = state_data["fingertips"][i]
                 fingertips = {
-                    "left": tips[:15],   # 左手5个指尖，每个3D坐标
-                    "right": tips[15:30], # 右手5个指尖，每个3D坐标
+                    "left": tips[:15],
+                    "right": tips[15:30],
                 }
-            
-            # 渲染帧
+
             return render_hand_on_frame(
                 frame,
                 mano_params=mano_params,
@@ -2059,39 +2062,34 @@ def api_episode_frame_rendered(episode_id: str):
                 mano_layers=mano_layers,
                 fingertips=fingertips
             )
-        
-        # 使用线程池并行渲染（4个线程，平衡速度和资源）
+
         with ThreadPoolExecutor(max_workers=4) as executor:
             rendered_frames = list(executor.map(render_single_frame, range(num_frames)))
-        
+
         render_time = time.time() - start_time
         print(f"✓ 并行渲染完成，耗时 {render_time:.2f}秒 ({num_frames/render_time:.1f} fps)")
-        
-        # 生成渲染视频（使用与原始视频相同的参数，保证速度）
+
         temp_video = video_path + ".tmp.mp4"
-        fps = 20  # 与原始视频相同
-        
-        # 获取 depth 的形状作为目标分辨率
+        fps = 20
+
         target_width, target_height = None, None
         if "depth_shape" in episode_data and episode_data["depth_shape"] is not None:
             depth_shape = episode_data["depth_shape"]
             if len(depth_shape) >= 3:
                 target_height = depth_shape[1]
                 target_width = depth_shape[2]
-        
+
         create_video_from_frames(rendered_frames, temp_video, fps=fps,
                                target_width=target_width, target_height=target_height, max_width=512)
-        
-        # 使用 ffmpeg 转换为 H.264（快速模式，与原始视频相同）
+
         print(f"转换渲染视频为 H.264 格式...")
         if convert_video_to_h264(temp_video, video_path, quality_mode='fast'):
             print(f"✓ 渲染视频转换成功")
-            os.unlink(temp_video)  # 删除临时文件
+            os.unlink(temp_video)
         else:
             print(f"⚠️  FFmpeg 转换失败，使用原始 mp4v 格式")
             os.rename(temp_video, video_path)
-        
-        # 返回视频文件（添加缓存头）
+
         print(f"→ 发送渲染视频: {video_path}")
         response = send_file(
             video_path,
@@ -2100,7 +2098,6 @@ def api_episode_frame_rendered(episode_id: str):
             conditional=True,
             download_name=f"{episode_data.get('name', 'episode')}_rendered.mp4"
         )
-        # 添加缓存头：缓存1小时
         response.headers['Cache-Control'] = 'public, max-age=3600'
         return response
     except Exception as e:
