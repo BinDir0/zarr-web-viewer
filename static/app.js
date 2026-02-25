@@ -64,25 +64,7 @@ function setupEventListeners() {
         nextBtn.addEventListener('click', navigateToNextEpisode);
     }
 
-    let spaceHeld = false;
-
-    function updateSpaceOverlayVisibility() {
-        if (!currentEpisodeId) return;
-
-        const renderedContainer = document.getElementById('renderedVideoContainer');
-        if (!renderedContainer) return;
-
-        if (spaceHeld) {
-            // 按住空格：临时隐藏 rendered wrapper
-            renderedContainer.style.display = 'none';
-        } else {
-            // 释放空格：恢复并排显示
-            renderedContainer.style.display = '';
-            renderedContainer.style.flex = '1';
-        }
-    }
-
-    // 键盘快捷键：左右箭头 / 空格按住隐藏
+    // 键盘快捷键：左右箭头导航 / 空格播放暂停
     document.addEventListener('keydown', (e) => {
         // 如果正在输入文本，不触发快捷键
         if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') {
@@ -90,12 +72,8 @@ function setupEventListeners() {
         }
 
         if (e.key === ' ') {
-            // 防止页面滚动
             e.preventDefault();
-            if (!spaceHeld) {
-                spaceHeld = true;
-                updateSpaceOverlayVisibility();
-            }
+            toggleVideoPlayback();
             return;
         }
 
@@ -107,16 +85,22 @@ function setupEventListeners() {
             navigateToNextEpisode();
         }
     });
+}
 
-    document.addEventListener('keyup', (e) => {
-        if (e.key === ' ') {
-            e.preventDefault();
-            if (spaceHeld) {
-                spaceHeld = false;
-                updateSpaceOverlayVisibility();
-            }
-        }
-    });
+// 空格键切换播放/暂停
+function toggleVideoPlayback() {
+    const framesGrid = document.getElementById('framesGrid');
+    if (!framesGrid) return;
+    const videos = framesGrid.querySelectorAll('.scrub-video');
+    if (videos.length === 0) return;
+
+    // 以 original 视频的状态为准
+    const primary = videos[0];
+    if (primary.paused) {
+        videos.forEach(v => v.play());
+    } else {
+        videos.forEach(v => v.pause());
+    }
 }
 
 // 更新预加载状态显示
@@ -683,6 +667,7 @@ function renderVideos(episodeId) {
         v.preload = 'auto';
         v.muted = true;
         v.playsInline = true;
+        v.style.pointerEvents = 'none'; // 防止视频拦截进度条拖拽事件
         v.load();
     });
 
@@ -772,6 +757,25 @@ function renderVideos(episodeId) {
     // 视频 metadata 加载后更新时间
     originalVideo.addEventListener('loadedmetadata', () => {
         updateTimeLabel(0, originalVideo.duration);
+    });
+
+    // 播放时同步进度条和 rendered 视频
+    originalVideo.addEventListener('timeupdate', () => {
+        if (isScrubbing) return;
+        const dur = originalVideo.duration;
+        if (!dur || !isFinite(dur)) return;
+        const ratio = originalVideo.currentTime / dur;
+        scrubber.value = Math.round(ratio * 1000);
+        updateTimeLabel(originalVideo.currentTime, dur);
+        // 同步 rendered 视频
+        if (renderedVideo.duration && isFinite(renderedVideo.duration)) {
+            renderedVideo.currentTime = Math.min(originalVideo.currentTime, renderedVideo.duration);
+        }
+    });
+
+    // 播放结束时两个视频都暂停
+    originalVideo.addEventListener('ended', () => {
+        renderedVideo.pause();
     });
 
     // 组装
