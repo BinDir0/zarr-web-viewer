@@ -89,6 +89,10 @@ function toggleVideoPlayback() {
     // 以 original 视频的状态为准
     const primary = videos[0];
     if (primary.paused) {
+        // 开始播放前，先同步 rendered 到 original 的时间点
+        if (videos.length > 1 && videos[1].duration && isFinite(videos[1].duration)) {
+            videos[1].currentTime = Math.min(primary.currentTime, videos[1].duration);
+        }
         videos.forEach(v => v.play());
     } else {
         videos.forEach(v => v.pause());
@@ -858,6 +862,9 @@ function renderVideos(episodeId) {
     };
 
     // ---- 播放时同步 scrubber + rendered ----
+    // 关键：播放中不要每帧都 set currentTime，否则 rendered 视频会不断 seek 导致卡顿
+    // 只在漂移超过阈值时才纠正
+    const SYNC_DRIFT_THRESHOLD = 0.15; // 秒，超过此值才强制同步
     originalVideo.addEventListener('timeupdate', () => {
         if (isScrubbing) return; // 拖拽中不更新，避免冲突
         const t = originalVideo.currentTime;
@@ -865,9 +872,12 @@ function renderVideos(episodeId) {
         if (!dur || !isFinite(dur)) return;
         scrubber.value = String(timeToScrubber(t));
         updateTimeLabel(t, dur);
-        // 同步 rendered
+        // 同步 rendered：仅在漂移过大时纠正，避免持续 seek 导致卡顿
         if (renderedVideo.duration && isFinite(renderedVideo.duration)) {
-            renderedVideo.currentTime = Math.min(t, renderedVideo.duration);
+            const drift = Math.abs(renderedVideo.currentTime - t);
+            if (drift > SYNC_DRIFT_THRESHOLD) {
+                renderedVideo.currentTime = Math.min(t, renderedVideo.duration);
+            }
         }
     });
 
