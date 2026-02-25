@@ -720,47 +720,102 @@ header h1 {
     line-height: 1.5;
 }
 
-.translation-item {
+/* ========== 翻译反馈选择式样式 ========== */
+.instructions-list {
+    margin-top: 0.5rem;
+}
+
+.loading-translations {
+    color: #999;
+    padding: 0.5rem 0;
+    font-size: 0.9rem;
+}
+
+.translation-error {
+    color: #f44336;
+    padding: 0.5rem 0;
+}
+
+.translate-status {
+    font-size: 0.85rem;
+    color: #999;
+}
+
+.trans-feedback-item {
     display: flex;
-    gap: 0.5rem;
-    margin: 0.5rem 0;
+    flex-wrap: wrap;
     align-items: flex-start;
-    padding: 8px;
-    border-radius: 4px;
-    transition: background-color 0.3s, border-left 0.3s;
-}
-
-.translation-item.manually-edited {
-    background-color: #fff9e6;
-    border-left: 3px solid #ffc107;
-    padding-left: 12px;
-}
-
-.translation-label {
-    font-weight: 600;
-    color: #4CAF50;
-    min-width: 45px;
-    padding-top: 0.5rem;
-}
-
-.translation-item.manually-edited .translation-label {
-    color: #f57c00;
-}
-
-.translation-input {
-    flex: 1;
-    padding: 0.5rem;
-    border: 2px solid #e0e0e0;
+    gap: 0.5rem;
+    padding: 0.6rem 0.5rem;
+    margin: 0.3rem 0;
     border-radius: 6px;
-    font-size: 0.95rem;
-    font-family: inherit;
-    resize: vertical;
-    transition: border-color 0.2s ease;
+    transition: background-color 0.2s;
 }
 
-.translation-input:focus {
+.trans-feedback-item:hover {
+    background-color: #f0f4ff;
+}
+
+.trans-feedback-item.trans-marked-error {
+    background-color: #fff3e0;
+    border-left: 3px solid #ff9800;
+    padding-left: calc(0.5rem + 3px);
+}
+
+.trans-error-checkbox {
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    cursor: pointer;
+    accent-color: #ff9800;
+    flex-shrink: 0;
+}
+
+.trans-feedback-label {
+    flex: 1;
+    display: flex;
+    gap: 0.4rem;
+    cursor: pointer;
+    line-height: 1.5;
+    font-size: 0.95rem;
+    color: #333;
+}
+
+.trans-num {
+    font-weight: 600;
+    color: #1565c0;
+    min-width: 24px;
+    flex-shrink: 0;
+}
+
+.trans-text {
+    flex: 1;
+}
+
+.trans-correction {
+    width: 100%;
+    padding-left: 42px;
+    margin-top: 0.3rem;
+}
+
+.trans-correction-input {
+    width: 100%;
+    padding: 0.4rem 0.6rem;
+    border: 2px solid #ff9800;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    background: #fff;
+    transition: border-color 0.2s;
+}
+
+.trans-correction-input:focus {
     outline: none;
-    border-color: #4CAF50;
+    border-color: #e65100;
+}
+
+.trans-correction-input::placeholder {
+    color: #bbb;
 }
 
 /* 响应式设计 */

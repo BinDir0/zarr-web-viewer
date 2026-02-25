@@ -1,0 +1,88 @@
+你正在修改一个 Zarr 数据集审核工具的前端。项目路径是当前目录。
+
+涉及文件：
+- templates/index.html（HTML 模板）
+- static/app.js（前端逻辑）
+- static/styles.css（样式）
+- app.py（后端 Flask，可能需要小改）
+
+## 当前行为
+
+1. 指令区域（instructions-display）：显示英文原文 + "翻译为中文"按钮 → 翻译后显示可编辑的中文翻译 textarea + "提交翻译"按钮
+2. 质量评估区域（annotation-section）：6 个 checkbox 丢弃原因 + 额外说明 textarea + "提交评估"按钮
+3. 翻译和评估是分开提交的（两个独立按钮、两个独立 API）
+
+## 需要改成
+
+### 1. 指令区域：不显示英文原文，直接显示翻译后的中文
+
+- 页面加载 episode 时，自动调用翻译 API（不需要用户点"翻译为中文"按钮）
+- 翻译完成后，直接显示中文翻译结果（不显示英文原文）
+- 去掉"翻译为中文"按钮和"提交翻译"按钮
+- 翻译结果不可编辑（纯文本显示，不是 textarea）
+- 如果数据库已有翻译，直接显示，不重新翻译
+- 保留预加载翻译的逻辑（startTranslationPreload 等），这样切换 episode 时翻译已经准备好了
+
+### 2. 翻译反馈：改成选择式
+
+- 在每条翻译旁边加一个 checkbox
+- 默认不勾选（表示翻译正确）
+- 如果某条翻译有问题，审核者勾选它
+- 勾选后可以展开一个小输入框让审核者写修正（可选）
+- 这样审核者不需要逐条检查打字，只需要扫一眼，有问题的勾出来
+
+### 3. 合并提交
+
+- 去掉原来的"提交翻译"和"提交评估"两个按钮
+- 只保留一个"提交评估"按钮
+- 点击"提交评估"时，同时提交：
+  - 质量评估（issues checkboxes + additional_notes）→ POST /api/annotation/<episode_id>
+  - 翻译反馈（哪些条目被标记为有问题 + 修正文本）→ POST /api/instruction/<episode_id>
+- 后端 POST /api/instruction/<episode_id> 已经存在，接受 { translations: [{index, original, translation, is_edited}] } 格式
+- 翻译反馈的提交逻辑：收集所有翻译条目，对于被勾选（标记有问题）的条目，如果审核者写了修正文本就用修正文本，否则保持原翻译但标记 is_edited=true；未勾选的条目保持原样 is_edited=false
+
+## 具体实现要求
+
+### index.html 改动
+- 去掉 instructions-actions 里的 translateBtn 和 submitTransBtn 按钮
+- annotation-section 保持不变（checkbox 丢弃原因 + 额外说明 + 提交评估按钮）
+
+### app.js 改动
+
+**displayInstructions 函数重写：**
+- 不再创建 translateBtn 和 submitTransBtn
+- 先检查数据库是否已有翻译（GET /api/instruction/<episode_id>）
+- 如果有，直接显示中文翻译
+- 如果没有，自动调用 POST /api/translate 翻译，然后显示
+- 显示格式：每条翻译是一行文本 + 左侧 checkbox
+- checkbox 默认不选中
+- 勾选后展开一个小 input 让审核者输入修正（可选）
+
+**saveAnnotation 函数修改：**
+- 在提交评估的同时，收集翻译反馈
+- 如果有翻译条目被勾选为有问题，同时 POST /api/instruction/<episode_id>
+- 翻译反馈数据格式：对每条翻译，{ index, original, translation, is_edited }
+  - 未勾选的：is_edited = false，translation = 原翻译
+  - 勾选的：is_edited = true，translation = 修正文本（如果有）或原翻译
+
+**删除不再需要的函数：**
+- translateInstructions（不再需要手动触发翻译）
+- submitInstructionTranslations（合并到 saveAnnotation）
+- showTranslations（重写为新的显示逻辑）
+
+**保留的函数：**
+- loadInstructionTranslations（改为自动翻译逻辑）
+- 所有预加载相关函数（preloadTranslation, processTranslationQueue, startTranslationPreload）
+
+### styles.css 改动
+- 翻译条目样式：每条翻译左侧有 checkbox，文本在右侧
+- 勾选后展开的修正输入框样式
+- 去掉 .translation-input textarea 相关样式（不再需要可编辑 textarea）
+
+## 注意事项
+- 不要改动视频播放、进度条、预加载视频等逻辑
+- 不要改动 sidebar、episode 列表等逻辑
+- 不要改动审核人姓名 modal 逻辑
+- 保持所有现有的 API 端点不变
+- 保持 hasUnsavedChanges() 函数正常工作（需要适配新的翻译反馈逻辑）
+- 确保预加载翻译的逻辑继续工作

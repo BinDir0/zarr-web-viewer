@@ -1,19 +1,71 @@
-修改 zarr-web-viewer 的视频 scrubbing 布局：从 overlay（rendered 叠在 original 上）改为左右并排（side-by-side）模式，方便同时对比。
+你需要为 zarr-web-viewer 添加「审核者登录 + 审核统计」功能。项目是 Flask + 原生 JS 前端。
 
-需要改的文件：static/app.js 和 static/styles.css
+## 需求
 
-具体要求：
-1. renderVideos() 中，把 originalVideo 和 renderedVideo 放在一个 flexbox 行容器里，各占 50% 宽度，左边 original 右边 rendered
-2. 当 toggle 关闭（不显示 rendered）时，original 独占 100% 宽度
-3. 空格键临时隐藏 rendered 时同理——rendered display:none，original 自动撑满（用 flex:1 实现）
-4. 进度条（scrubber）和时间标签放在两个视频下方，横跨整个容器宽度
-5. CSS：去掉 .scrub-video-rendered 的 absolute 定位，改为 flex 布局。两个视频上方各加一个小标签（"Original" / "Rendered"），用半透明背景 absolute 定位在视频左上角
-6. 保持现有的 scrub 同步逻辑、preloadedVideos 缓存复用不变
-7. 视频容器加个最大高度限制（60vh），避免视频太大撑爆页面
+### 1. 审核者姓名输入（前端 modal）
+- 用户首次进入网站时，弹出一个简洁的 modal 要求输入审核者姓名（中文名即可）
+- 姓名存入 localStorage（key: `reviewer_name`），下次进入自动填充但仍弹出确认
+- modal 有"确认"按钮，不输入姓名不能关闭（必填）
+- 确认后 modal 消失，正常使用网站
+- 在页面 header 右侧显示当前审核者姓名，如"👤 张三"，点击可修改
+- 全局变量 `reviewerName` 存储当前审核者姓名
 
-注意：
-- renderedVideo 的 id="renderedVideoContainer" 要保留，updateSpaceOverlayVisibility() 依赖它
-- 但现在 renderedVideoContainer 应该是包裹 rendered 视频的 wrapper div（不是 video 元素本身），这样隐藏时 flex 布局能正确收缩
-- 不要改 updateSpaceOverlayVisibility() 的逻辑，只需确保 getElementById('renderedVideoContainer') 能找到正确的元素
+### 2. 后端记录审核者（app.py）
+- `annotations` 表新增 `reviewer_name TEXT` 字段（用 ALTER TABLE 兼容旧数据库）
+- POST `/api/annotation/<episode_id>` 接收新字段 `reviewer_name`，保存到数据库
+- GET `/api/annotation/<episode_id>` 返回 `reviewer_name`
 
-只改 static/app.js 和 static/styles.css，不要动其他文件。
+### 3. 前端保存标注时带上审核者姓名（app.js）
+- `saveAnnotation()` 函数的 POST body 中加入 `reviewer_name: reviewerName`
+- 保存成功后状态消息中显示审核者姓名
+
+### 4. 管理后台页面（新建 /admin 路由 + admin.html）
+- 新建 `templates/admin.html` 页面
+- 新建 Flask 路由 `@app.route("/admin")`
+- 页面内容：
+  a) 顶部：总审核量、总审核人数、今日审核量
+  b) 审核者排行表格：姓名 | 今日审核量 | 总审核量 | 最后审核时间
+  c) 每日审核趋势（简单的文字表格即可，最近 7 天每天每人审核了多少）
+  d) 自动刷新：每 30 秒自动刷新数据
+- 新建 API `/api/admin/stats` 返回所有统计数据
+- admin 页面不需要登录验证，直接访问即可
+- 样式简洁，和主站风格一致（深色主题）
+
+### 5. API 设计 `/api/admin/stats`
+返回 JSON：
+```json
+{
+  "total_annotations": 1234,
+  "total_reviewers": 5,
+  "today_annotations": 42,
+  "reviewers": [
+    {
+      "name": "张三",
+      "today_count": 20,
+      "total_count": 500,
+      "last_annotation_time": "2026-02-25T22:00:00"
+    }
+  ],
+  "daily_stats": [
+    {
+      "date": "2026-02-25",
+      "reviewers": {"张三": 20, "李四": 15}
+    }
+  ]
+}
+```
+
+## 文件修改清单
+1. `app.py` - 新增 reviewer_name 字段、/admin 路由、/api/admin/stats API
+2. `static/app.js` - 审核者 modal 逻辑、saveAnnotation 加 reviewer_name
+3. `templates/index.html` - 添加 modal HTML、header 显示审核者
+4. `templates/admin.html` - 新建管理后台页面
+5. `static/styles.css` - modal 样式、admin 页面样式
+
+## 注意事项
+- 数据库用 SQLite（已有 annotations.db），用 ALTER TABLE 添加新字段兼容旧数据
+- 日期统计用 `updated_at` 字段（ISO 格式字符串），用 `substr(updated_at, 1, 10)` 提取日期
+- 不要改动现有的 episode 加载、视频播放、标注勾选等逻辑
+- 中文注释
+- admin.html 用独立的内联 JS，不要修改 app.js 中的其他功能
+- daily_stats 返回最近 7 天的数据

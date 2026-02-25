@@ -22,10 +22,13 @@ let preloadedTranslations = new Set(); // 已预加载翻译的 episode_id
 let savedAnnotationState = {
     issues: [],
     additionalNotes: '',
-    translationsSubmitted: true  // 初始假设翻译已提交
+    submitted: false  // 当前 episode 是否已提交评估
 };
 
 let initialAnnotationState = null;  // 页面加载时的初始状态
+
+// 当前翻译数据（用于提交时收集反馈）
+let currentTranslations = []; // [{index, original, translation}]
 
 // 审核人姓名
 let reviewerName = localStorage.getItem('reviewer_name') || '';
@@ -542,10 +545,9 @@ function updateNavigationButtons() {
 
 // 导航到上一个 episode
 function navigateToPrevEpisode() {
-    // 检查是否有未保存的更改
     if (hasUnsavedChanges()) {
-        if (!confirm('当前页面有未保存的更改（翻译或评估），确定要离开吗？\n\n点击"确定"将放弃这些更改并跳转到上一个 Episode。')) {
-            return;  // 用户取消，不跳转
+        if (!confirm('当前 Episode 还未提交评估，确定要离开吗？')) {
+            return;
         }
     }
     
@@ -558,10 +560,9 @@ function navigateToPrevEpisode() {
 
 // 导航到下一个 episode
 function navigateToNextEpisode() {
-    // 检查是否有未保存的更改
     if (hasUnsavedChanges()) {
-        if (!confirm('当前页面有未保存的更改（翻译或评估），确定要离开吗？\n\n点击"确定"将放弃这些更改并跳转到下一个 Episode。')) {
-            return;  // 用户取消，不跳转
+        if (!confirm('当前 Episode 还未提交评估，确定要离开吗？')) {
+            return;
         }
     }
     
@@ -572,32 +573,27 @@ function navigateToNextEpisode() {
     selectEpisode(nextEpisode.id, nextEpisode.name, nextEpisode.dataset, nextEpisode.dataset_index);
 }
 
-// 检查是否有未保存的更改
+// 检查是否有未保存的更改（即当前 episode 还没提交评估）
 function hasUnsavedChanges() {
-    // 1. 检查翻译是否有未提交的更改
-    const submitTransBtn = document.getElementById('submitTransBtn');
-    if (submitTransBtn && !submitTransBtn.disabled) {
-        // 提交按钮已启用，说明有未提交的翻译
+    // 如果当前 episode 已经提交过评估，就不算有未保存更改
+    if (savedAnnotationState.submitted) {
+        return false;
+    }
+    
+    // 检查是否有任何评估内容被填写
+    const checkboxes = document.querySelectorAll('input[name="issue"]:checked');
+    const additionalNotes = document.getElementById('additionalNotes');
+    const currentNotes = additionalNotes ? additionalNotes.value.trim() : '';
+    const transErrorCheckboxes = document.querySelectorAll('.trans-error-checkbox:checked');
+    
+    // 如果勾选了任何问题、写了备注、或标记了翻译错误，说明有内容需要提交
+    if (checkboxes.length > 0 || currentNotes !== '' || transErrorCheckboxes.length > 0) {
         return true;
     }
     
-    // 2. 检查评估表单的更改
-    // 获取当前的 checkbox 选中状态
-    const currentIssues = [];
-    const checkboxes = document.querySelectorAll('input[name="issue"]:checked');
-    checkboxes.forEach(cb => {
-        currentIssues.push(cb.value);
-    });
-    
-    // 获取当前的额外说明
-    const additionalNotes = document.getElementById('additionalNotes');
-    const currentNotes = additionalNotes ? additionalNotes.value.trim() : '';
-    
-    // 比较当前状态和已保存状态
-    const issuesChanged = !arraysEqual(currentIssues.sort(), savedAnnotationState.issues.sort());
-    const notesChanged = currentNotes !== savedAnnotationState.additionalNotes;
-    
-    return issuesChanged || notesChanged;
+    // 什么都没填也算"未提交"——因为用户需要确认质量良好
+    // 但如果是刚切过来还没看，不弹提示（通过 submitted 标记控制）
+    return true; // 只要没提交过，就提示
 }
 
 // 辅助函数：比较两个数组是否相等
@@ -611,7 +607,22 @@ function arraysEqual(arr1, arr2) {
 
 // 选择一个episode
 async function selectEpisode(episodeId, episodeName, datasetName, episodeIndex) {
+    // 如果已经有当前 episode 且未提交评估，弹提示
+    if (currentEpisodeId && currentEpisodeId !== episodeId && hasUnsavedChanges()) {
+        if (!confirm('当前 Episode 还未提交评估，确定要离开吗？')) {
+            return;
+        }
+    }
+    
     currentEpisodeId = episodeId;
+    
+    // 重置提交状态
+    savedAnnotationState = {
+        issues: [],
+        additionalNotes: '',
+        submitted: false
+    };
+    currentTranslations = [];
     
     // 保存episode信息用于保存标注
     window.currentEpisodeInfo = {
@@ -943,12 +954,12 @@ function renderVideos(episodeId) {
     framesGrid.appendChild(container);
 }
 
-// 显示指令信息
+// 显示指令信息（自动翻译，直接显示中文，带 checkbox 标记错误）
 async function displayInstructions(instructions) {
     const framesSection = document.querySelector('.frames-section');
     const annotationSection = document.querySelector('.annotation-section');
     
-    // 移除旧的指令显示（可能在任何位置）
+    // 移除旧的指令显示
     const oldInstructions = document.querySelector('.instructions-display');
     if (oldInstructions) {
         oldInstructions.remove();
@@ -960,47 +971,168 @@ async function displayInstructions(instructions) {
     instructionsDiv.innerHTML = `
         <div class="instructions-header">
             <h4>📝 任务指令:</h4>
-            <div class="instructions-actions">
-                <button id="translateBtn" class="btn-translate">翻译为中文</button>
-                <button id="submitTransBtn" class="btn-submit" disabled>提交翻译</button>
-            </div>
+            <span class="translate-status" id="translateStatus"></span>
+        </div>
+        <div class="instructions-list" id="instructionsList">
+            <div class="loading-translations">翻译中...</div>
         </div>
     `;
-    
-    // 原始指令（英文）
-    const originalDiv = document.createElement('div');
-    originalDiv.className = 'instructions-original';
-    originalDiv.id = 'instructionsOriginal';
-    
-    instructions.forEach((inst, idx) => {
-        const instItem = document.createElement('div');
-        instItem.className = 'instruction-item';
-        instItem.textContent = `${idx + 1}. ${inst}`;
-        instItem.dataset.index = idx;
-        instItem.dataset.original = inst;
-        originalDiv.appendChild(instItem);
-    });
-    
-    instructionsDiv.appendChild(originalDiv);
-    
-    // 翻译区域（初始隐藏）
-    const translationDiv = document.createElement('div');
-    translationDiv.className = 'instructions-translation';
-    translationDiv.id = 'instructionsTranslation';
-    translationDiv.style.display = 'none';
-    instructionsDiv.appendChild(translationDiv);
     
     // 插入到视频区域和标注区域之间
     if (framesSection && annotationSection) {
         framesSection.parentNode.insertBefore(instructionsDiv, annotationSection);
     }
     
-    // 加载已有的翻译（如果有）
-    await loadInstructionTranslations();
+    // 尝试加载已有翻译或自动翻译
+    await loadOrTranslateInstructions(instructions);
+}
+
+// 加载已有翻译或自动翻译
+async function loadOrTranslateInstructions(instructions) {
+    if (!currentEpisodeId) return;
     
-    // 绑定事件
-    document.getElementById('translateBtn').addEventListener('click', translateInstructions);
-    document.getElementById('submitTransBtn').addEventListener('click', submitInstructionTranslations);
+    const listDiv = document.getElementById('instructionsList');
+    const statusEl = document.getElementById('translateStatus');
+    if (!listDiv) return;
+    
+    try {
+        // 先检查数据库是否已有翻译
+        const response = await fetch(`/api/instruction/${currentEpisodeId}`);
+        const data = await response.json();
+        
+        let translations = {};
+        
+        if (data.success && Object.keys(data.translations).length >= instructions.length) {
+            // 已有翻译，直接使用
+            translations = data.translations;
+            if (statusEl) statusEl.textContent = '';
+        } else {
+            // 没有翻译，自动调用翻译 API
+            if (statusEl) statusEl.textContent = '翻译中...';
+            
+            const translateResponse = await fetch('/api/translate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ texts: instructions })
+            });
+            
+            const translateData = await translateResponse.json();
+            
+            if (translateData.success && translateData.translations) {
+                // 构建翻译对象
+                instructions.forEach((inst, i) => {
+                    translations[i] = {
+                        original: inst,
+                        translation: translateData.translations[i] || '[翻译失败]'
+                    };
+                });
+                
+                // 保存翻译到数据库
+                const saveTranslations = instructions.map((inst, i) => ({
+                    index: i,
+                    original: inst,
+                    translation: translateData.translations[i] || '[翻译失败]'
+                }));
+                
+                await fetch(`/api/instruction/${currentEpisodeId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ translations: saveTranslations })
+                });
+                
+                if (statusEl) statusEl.textContent = '';
+            } else {
+                throw new Error('翻译失败');
+            }
+        }
+        
+        // 渲染翻译结果（带 checkbox）
+        renderTranslationItems(translations, instructions);
+        
+    } catch (error) {
+        console.error('加载/翻译指令失败:', error);
+        if (listDiv) {
+            listDiv.innerHTML = '<div class="translation-error">翻译加载失败</div>';
+        }
+        // fallback: 显示英文原文
+        currentTranslations = instructions.map((inst, i) => ({
+            index: i, original: inst, translation: inst
+        }));
+    }
+}
+
+// 渲染翻译条目（checkbox + 中文文本）
+function renderTranslationItems(translations, originalInstructions) {
+    const listDiv = document.getElementById('instructionsList');
+    if (!listDiv) return;
+    
+    listDiv.innerHTML = '';
+    currentTranslations = [];
+    
+    const sortedKeys = Object.keys(translations).sort((a, b) => parseInt(a) - parseInt(b));
+    
+    sortedKeys.forEach(key => {
+        const trans = translations[key];
+        const translation = typeof trans === 'string' ? trans : (trans.translation || trans.text || '');
+        const original = typeof trans === 'string' ? (originalInstructions ? originalInstructions[parseInt(key)] : '') : (trans.original || '');
+        const idx = parseInt(key);
+        
+        // 保存到 currentTranslations
+        currentTranslations.push({ index: idx, original: original, translation: translation });
+        
+        // 创建条目
+        const item = document.createElement('div');
+        item.className = 'trans-feedback-item';
+        item.dataset.index = idx;
+        
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'trans-error-checkbox';
+        checkbox.id = `transError_${idx}`;
+        checkbox.title = '勾选表示此条翻译有误';
+        
+        const label = document.createElement('label');
+        label.className = 'trans-feedback-label';
+        label.htmlFor = `transError_${idx}`;
+        
+        const numSpan = document.createElement('span');
+        numSpan.className = 'trans-num';
+        numSpan.textContent = `${idx + 1}.`;
+        
+        const textSpan = document.createElement('span');
+        textSpan.className = 'trans-text';
+        textSpan.textContent = translation;
+        
+        label.appendChild(numSpan);
+        label.appendChild(textSpan);
+        
+        // 修正输入框（勾选后展开）
+        const correctionDiv = document.createElement('div');
+        correctionDiv.className = 'trans-correction';
+        correctionDiv.style.display = 'none';
+        
+        const correctionInput = document.createElement('input');
+        correctionInput.type = 'text';
+        correctionInput.className = 'trans-correction-input';
+        correctionInput.placeholder = '输入修正翻译（可选）';
+        correctionInput.dataset.index = idx;
+        
+        correctionDiv.appendChild(correctionInput);
+        
+        // checkbox 切换展开修正框
+        checkbox.addEventListener('change', () => {
+            correctionDiv.style.display = checkbox.checked ? 'block' : 'none';
+            item.classList.toggle('trans-marked-error', checkbox.checked);
+            if (checkbox.checked) {
+                correctionInput.focus();
+            }
+        });
+        
+        item.appendChild(checkbox);
+        item.appendChild(label);
+        item.appendChild(correctionDiv);
+        listDiv.appendChild(item);
+    });
 }
 
 // 加载标注
@@ -1023,11 +1155,14 @@ async function loadAnnotation(episodeId) {
             additionalNotes.value = notesValue;
         }
         
-        // 更新已保存状态（这是从服务器加载的最新保存状态）
+        // 判断是否已有提交过的评估（有 updated_at 或有 issues 或有 content）
+        const hasExistingAnnotation = data.updated_at || issues.length > 0 || data.content;
+        
+        // 更新已保存状态
         savedAnnotationState = {
-            issues: [...issues],  // 创建副本
+            issues: [...issues],
             additionalNotes: notesValue,
-            translationsSubmitted: true  // 假设翻译已提交（或没有翻译）
+            submitted: !!hasExistingAnnotation
         };
         
         // 清除状态消息
@@ -1040,7 +1175,7 @@ async function loadAnnotation(episodeId) {
     }
 }
 
-// 保存标注
+// 保存标注（同时提交质量评估 + 翻译反馈）
 async function saveAnnotation() {
     if (!currentEpisodeId || !window.currentEpisodeInfo) {
         return;
@@ -1053,7 +1188,12 @@ async function saveAnnotation() {
     const checkboxes = document.querySelectorAll('input[name="issue"]:checked');
     const issues = Array.from(checkboxes).map(cb => cb.value);
     
+    // 收集翻译反馈
+    const transErrorCheckboxes = document.querySelectorAll('.trans-error-checkbox:checked');
+    const hasTranslationFeedback = transErrorCheckboxes.length > 0;
+    
     try {
+        // 1. 提交质量评估
         const response = await fetch(`/api/annotation/${currentEpisodeId}`, {
             method: 'POST',
             headers: {
@@ -1066,276 +1206,73 @@ async function saveAnnotation() {
                 dataset_name: window.currentEpisodeInfo.dataset,
                 episode_index: window.currentEpisodeInfo.index,
                 reviewer_name: reviewerName,
-                // 保留旧字段向后兼容
                 content: issues.length > 0 ? `问题: ${issues.join(', ')}` : '质量良好'
             }),
         });
         
         const data = await response.json();
         
-        if (data.ok) {
-            const isValid = data.is_valid === 1;
-            if (isValid) {
-                status.textContent = '✓ 已标记为【质量良好】';
-                status.className = 'status-message success';
-            } else {
-                status.textContent = `✓ 已标记为【需丢弃】(${issues.length}个问题)`;
-                status.className = 'status-message warning';
-            }
-            
-            // 更新已保存状态（保存成功后，当前状态就是已保存状态）
-            savedAnnotationState = {
-                issues: [...issues],  // 创建副本
-                additionalNotes: additionalNotes,
-                translationsSubmitted: savedAnnotationState.translationsSubmitted
-            };
-            
-            // 3秒后清除消息
-            setTimeout(() => {
-                status.textContent = '';
-                status.className = 'status-message';
-            }, 3000);
-        } else {
-            throw new Error('保存失败');
+        if (!data.ok) {
+            throw new Error('保存评估失败');
         }
+        
+        // 2. 如果有翻译反馈，同时提交
+        if (hasTranslationFeedback && currentTranslations.length > 0) {
+            const translations = currentTranslations.map(t => {
+                const checkbox = document.querySelector(`#transError_${t.index}`);
+                const correctionInput = document.querySelector(`.trans-correction-input[data-index="${t.index}"]`);
+                const isMarkedError = checkbox && checkbox.checked;
+                const correction = correctionInput ? correctionInput.value.trim() : '';
+                
+                return {
+                    index: t.index,
+                    original: t.original,
+                    translation: (isMarkedError && correction) ? correction : t.translation,
+                    is_edited: isMarkedError
+                };
+            });
+            
+            await fetch(`/api/instruction/${currentEpisodeId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ translations })
+            });
+        }
+        
+        // 更新状态
+        const isValid = data.is_valid === 1;
+        const errorCount = transErrorCheckboxes.length;
+        let statusText = '';
+        
+        if (isValid && errorCount === 0) {
+            statusText = '✓ 已标记为【质量良好】';
+            status.className = 'status-message success';
+        } else {
+            const parts = [];
+            if (issues.length > 0) parts.push(`${issues.length}个问题`);
+            if (errorCount > 0) parts.push(`${errorCount}条翻译有误`);
+            statusText = `✓ 已标记为【需丢弃】(${parts.join(', ')})`;
+            status.className = 'status-message warning';
+        }
+        status.textContent = statusText;
+        
+        // 标记为已提交
+        savedAnnotationState = {
+            issues: [...issues],
+            additionalNotes: additionalNotes,
+            submitted: true
+        };
+        
+        // 3秒后清除消息
+        setTimeout(() => {
+            status.textContent = '';
+            status.className = 'status-message';
+        }, 3000);
+        
     } catch (error) {
         console.error('保存标注失败:', error);
         status.textContent = '✗ 保存失败';
         status.className = 'status-message error';
-    }
-}
-
-// ========== Instruction 翻译功能 ==========
-
-// 加载已有的翻译
-async function loadInstructionTranslations() {
-    if (!currentEpisodeId) return;
-    
-    try {
-        const response = await fetch(`/api/instruction/${currentEpisodeId}`);
-        const data = await response.json();
-        
-        if (data.success && Object.keys(data.translations).length > 0) {
-            // 显示翻译区域，标记为已提交（因为是从数据库加载的）
-            showTranslations(data.translations, false, false);
-        }
-    } catch (error) {
-        console.warn('加载翻译失败:', error);
-    }
-}
-
-// 翻译指令（批量翻译）
-async function translateInstructions() {
-    const translateBtn = document.getElementById('translateBtn');
-    const originalDiv = document.getElementById('instructionsOriginal');
-    const translationDiv = document.getElementById('instructionsTranslation');
-    
-    if (!originalDiv) return;
-    
-    // 禁用按钮，显示加载状态
-    translateBtn.disabled = true;
-    translateBtn.textContent = '翻译中...';
-    
-    try {
-        const instructions = Array.from(originalDiv.querySelectorAll('.instruction-item'));
-        
-        // 收集所有原文
-        const texts = instructions.map(item => item.dataset.original);
-        
-        // 批量翻译
-        const response = await fetch('/api/translate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ texts: texts })
-        });
-        
-        const data = await response.json();
-        
-        if (data.success && data.translations) {
-            // 构建翻译结果对象
-            const translations = {};
-            instructions.forEach((item, i) => {
-                const index = parseInt(item.dataset.index);
-                translations[index] = {
-                    original: item.dataset.original,
-                    translation: data.translations[i] || '[翻译失败]'
-                };
-            });
-            
-            // 显示翻译结果
-            showTranslations(translations, true);
-            
-            translateBtn.textContent = '重新翻译';
-            translateBtn.disabled = false;
-        } else {
-            throw new Error(data.error || '翻译失败');
-        }
-        
-    } catch (error) {
-        console.error('翻译失败:', error);
-        alert('翻译失败: ' + error.message);
-        translateBtn.textContent = '翻译为中文';
-        translateBtn.disabled = false;
-    }
-}
-
-// 显示翻译结果
-function showTranslations(translations, editable = false, markAsUnsubmitted = true) {
-    const originalDiv = document.getElementById('instructionsOriginal');
-    const translationDiv = document.getElementById('instructionsTranslation');
-    const submitBtn = document.getElementById('submitTransBtn');
-    
-    if (!translationDiv) return;
-    
-    // 清空并显示翻译区域
-    translationDiv.innerHTML = '<h5>中文翻译（可编辑）:</h5>';
-    translationDiv.style.display = 'block';
-    
-    // 创建翻译条目
-    Object.keys(translations).sort((a, b) => parseInt(a) - parseInt(b)).forEach(index => {
-        const trans = translations[index];
-        const translation = typeof trans === 'string' ? trans : (trans.translation || trans.text);
-        const original = typeof trans === 'string' ? '' : trans.original;
-        const isEdited = typeof trans === 'object' && trans.is_edited;
-        
-        const transItem = document.createElement('div');
-        transItem.className = 'translation-item';
-        if (isEdited) {
-            transItem.classList.add('manually-edited');
-        }
-        
-        const label = document.createElement('div');
-        label.className = 'translation-label';
-        label.textContent = `${parseInt(index) + 1}.`;
-        if (isEdited) {
-            label.textContent += ' ✏️';  // 显示编辑标记
-            label.title = '此翻译已被手动修改';
-        }
-        
-        const textarea = document.createElement('textarea');
-        textarea.className = 'translation-input';
-        textarea.value = translation;
-        textarea.dataset.index = index;
-        textarea.dataset.original = original;
-        textarea.dataset.originalTranslation = translation;  // 保存原始翻译用于对比
-        textarea.dataset.wasEdited = isEdited ? '1' : '0';
-        textarea.rows = 2;
-        
-        // 监听输入变化，标记为已修改
-        textarea.addEventListener('input', function() {
-            const hasChanged = this.value !== this.dataset.originalTranslation;
-            if (hasChanged) {
-                transItem.classList.add('manually-edited');
-                if (!label.textContent.includes('✏️')) {
-                    label.textContent = label.textContent.split(' ')[0] + ' ✏️';
-                    label.title = '此翻译已被手动修改';
-                }
-                // 用户修改了翻译，启用提交按钮并标记为未提交
-                if (submitBtn) {
-                    submitBtn.disabled = false;
-                    savedAnnotationState.translationsSubmitted = false;
-                }
-            } else if (this.dataset.wasEdited === '0') {
-                // 如果改回原文且之前未被编辑，移除标记
-                transItem.classList.remove('manually-edited');
-                label.textContent = label.textContent.replace(' ✏️', '');
-                label.title = '';
-            }
-        });
-        
-        transItem.appendChild(label);
-        transItem.appendChild(textarea);
-        translationDiv.appendChild(transItem);
-    });
-    
-    // 根据参数决定是否启用提交按钮
-    if (submitBtn) {
-        if (markAsUnsubmitted) {
-            // 新翻译，启用提交按钮
-            submitBtn.disabled = false;
-            savedAnnotationState.translationsSubmitted = false;
-        } else {
-            // 从数据库加载的已提交翻译，禁用提交按钮
-            submitBtn.disabled = true;
-            savedAnnotationState.translationsSubmitted = true;
-        }
-    }
-    
-    // 隐藏原始指令（可选）
-    if (editable && originalDiv) {
-        originalDiv.style.opacity = '0.5';
-    }
-}
-
-// 提交翻译
-async function submitInstructionTranslations() {
-    const translationDiv = document.getElementById('instructionsTranslation');
-    const submitBtn = document.getElementById('submitTransBtn');
-    
-    if (!translationDiv || !currentEpisodeId) return;
-    
-    // 收集所有翻译
-    const textareas = translationDiv.querySelectorAll('.translation-input');
-    const translations = [];
-    
-    textareas.forEach(textarea => {
-        const currentValue = textarea.value.trim();
-        const originalTranslation = textarea.dataset.originalTranslation;
-        const wasEdited = textarea.dataset.wasEdited === '1';
-        
-        // 判断是否被修改：当前值和原始翻译不同，或者之前已被标记为修改
-        const isEdited = wasEdited || (currentValue !== originalTranslation);
-        
-        translations.push({
-            index: parseInt(textarea.dataset.index),
-            original: textarea.dataset.original,
-            translation: currentValue,
-            is_edited: isEdited
-        });
-    });
-    
-    if (translations.length === 0) {
-        alert('没有可提交的翻译');
-        return;
-    }
-    
-    // 禁用按钮
-    submitBtn.disabled = true;
-    submitBtn.textContent = '提交中...';
-    
-    try {
-        const response = await fetch(`/api/instruction/${currentEpisodeId}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ translations })
-        });
-        
-        const data = await response.json();
-        
-        if (data.success) {
-            // 统计修改情况
-            const editedCount = translations.filter(t => t.is_edited).length;
-            const totalCount = translations.length;
-            
-            submitBtn.textContent = `✓ 已提交 (${editedCount}/${totalCount} 条已修改)`;
-            // 提交成功后保持按钮禁用状态，表示没有未提交的更改
-            submitBtn.disabled = true;
-            
-            // 更新翻译提交状态
-            savedAnnotationState.translationsSubmitted = true;
-            
-            setTimeout(() => {
-                submitBtn.textContent = '提交翻译';
-                // 保持禁用状态
-            }, 3000);
-        } else {
-            throw new Error(data.error || '提交失败');
-        }
-    } catch (error) {
-        console.error('提交翻译失败:', error);
-        alert('提交失败: ' + error.message);
-        submitBtn.textContent = '提交翻译';
-        submitBtn.disabled = false;
     }
 }
 
