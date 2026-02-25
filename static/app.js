@@ -54,15 +54,6 @@ function setupEventListeners() {
         saveButton.addEventListener('click', saveAnnotation);
     }
 
-    const toggleRendered = document.getElementById('toggleRendered');
-    if (toggleRendered) {
-        toggleRendered.addEventListener('change', () => {
-            if (currentEpisodeId) {
-                renderVideos(currentEpisodeId);
-            }
-        });
-    }
-    
     // 上一个/下一个按钮
     const prevBtn = document.getElementById('prevEpisodeBtn');
     const nextBtn = document.getElementById('nextEpisodeBtn');
@@ -76,20 +67,19 @@ function setupEventListeners() {
     let spaceHeld = false;
 
     function updateSpaceOverlayVisibility() {
-        // 按住空格时临时隐藏投影（如果 toggleRendered 当前开启）
-        if (!toggleRendered || !currentEpisodeId) return;
-        if (!toggleRendered.checked) return;
-        if (!spaceHeld) return;
+        if (!currentEpisodeId) return;
 
-        // 空格按住时显示原始帧（相当于临时取消投影）
-        const imgs = document.querySelectorAll('#framesGrid img');
-        imgs.forEach((img) => {
-            const url = new URL(img.src, window.location.origin);
-            if (url.pathname.includes('/frame/rendered')) {
-                url.pathname = url.pathname.replace('/frame/rendered', '/frame/original');
-                img.src = url.toString();
-            }
-        });
+        const renderedContainer = document.getElementById('renderedVideoContainer');
+        if (!renderedContainer) return;
+
+        if (spaceHeld) {
+            // 按住空格：临时隐藏 rendered wrapper
+            renderedContainer.style.display = 'none';
+        } else {
+            // 释放空格：恢复并排显示
+            renderedContainer.style.display = '';
+            renderedContainer.style.flex = '1';
+        }
     }
 
     // 键盘快捷键：左右箭头 / 空格按住隐藏
@@ -108,7 +98,7 @@ function setupEventListeners() {
             }
             return;
         }
-        
+
         if (e.key === 'ArrowLeft') {
             e.preventDefault();
             navigateToPrevEpisode();
@@ -123,10 +113,7 @@ function setupEventListeners() {
             e.preventDefault();
             if (spaceHeld) {
                 spaceHeld = false;
-                // 释放空格：恢复当前 toggle 状态
-                if (currentEpisodeId) {
-                    renderVideos(currentEpisodeId);
-                }
+                updateSpaceOverlayVisibility();
             }
         }
     });
@@ -668,33 +655,121 @@ async function loadEpisodeDetail(episodeId) {
     }
 }
 
-// 渲染抽帧视图（6 帧等距抽取）
+// 渲染视频 scrubbing 视图
 function renderVideos(episodeId) {
     const framesGrid = document.getElementById('framesGrid');
-    const toggle = document.getElementById('toggleRendered');
-    const showRendered = toggle ? toggle.checked : true;
-
     framesGrid.innerHTML = '';
 
-    const strip = document.createElement('div');
-    strip.className = 'frames-strip';
+    // 外层 flex 容器
+    const flexRow = document.createElement('div');
+    flexRow.className = 'video-side-by-side';
 
-    for (let i = 0; i < 6; i++) {
-        const tile = document.createElement('div');
-        tile.className = 'frame-tile';
+    // 尝试复用预加载的 video 元素
+    const cached = preloadedVideos.get(episodeId);
 
-        const img = document.createElement('img');
-        img.alt = `frame_${i}`;
-        // 叠加投影 / 原始帧 二选一
-        img.src = showRendered
-            ? `/api/episode/${episodeId}/frame/rendered?i=${i}&n=6`
-            : `/api/episode/${episodeId}/frame/original?i=${i}&n=6`;
+    const originalVideo = cached ? cached.originalVideo.cloneNode(true) : document.createElement('video');
+    const renderedVideo = cached ? cached.renderedVideo.cloneNode(true) : document.createElement('video');
 
-        tile.appendChild(img);
-        strip.appendChild(tile);
+    if (!cached) {
+        originalVideo.src = `/api/episode/${episodeId}/video/original`;
+        renderedVideo.src = `/api/episode/${episodeId}/video/rendered`;
+    } else {
+        originalVideo.src = cached.original;
+        renderedVideo.src = cached.rendered;
     }
 
-    framesGrid.appendChild(strip);
+    // 通用属性
+    [originalVideo, renderedVideo].forEach(v => {
+        v.preload = 'auto';
+        v.muted = true;
+        v.playsInline = true;
+        v.load();
+    });
+
+    originalVideo.className = 'scrub-video scrub-video-original';
+    renderedVideo.className = 'scrub-video scrub-video-rendered';
+
+    // Original wrapper
+    const originalWrapper = document.createElement('div');
+    originalWrapper.className = 'video-wrapper';
+    originalWrapper.id = 'originalVideoWrapper';
+    const originalLabel = document.createElement('div');
+    originalLabel.className = 'video-label';
+    originalLabel.textContent = 'Original';
+    originalWrapper.appendChild(originalLabel);
+    originalWrapper.appendChild(originalVideo);
+
+    // Rendered wrapper
+    const renderedWrapper = document.createElement('div');
+    renderedWrapper.className = 'video-wrapper';
+    renderedWrapper.id = 'renderedVideoContainer';
+    const renderedLabel = document.createElement('div');
+    renderedLabel.className = 'video-label';
+    renderedLabel.textContent = 'Rendered';
+    renderedWrapper.appendChild(renderedLabel);
+    renderedWrapper.appendChild(renderedVideo);
+
+    flexRow.appendChild(originalWrapper);
+    flexRow.appendChild(renderedWrapper);
+
+    // 进度条 scrubber
+    const scrubber = document.createElement('input');
+    scrubber.type = 'range';
+    scrubber.className = 'video-scrubber';
+    scrubber.min = '0';
+    scrubber.max = '1000';
+    scrubber.value = '0';
+    scrubber.step = '1';
+
+    // 时间显示
+    const timeLabel = document.createElement('div');
+    timeLabel.className = 'scrub-time-label';
+    timeLabel.textContent = '0:00 / 0:00';
+
+    // scrub 逻辑：拖动时同步两个视频的 currentTime
+    let isScrubbing = false;
+
+    function seekToRatio(ratio) {
+        // 获取当前 DOM 中的所有 scrub-video（支持 reloadedVideos 场景）
+        const videos = framesGrid.querySelectorAll('.scrub-video');
+        let dur = 0;
+        videos.forEach(v => { if (v.duration && isFinite(v.duration)) dur = v.duration; });
+        if (!dur) return;
+        const t = ratio * dur;
+        videos.forEach(v => { v.currentTime = t; });
+        updateTimeLabel(t, dur);
+    }
+
+    function updateTimeLabel(current, duration) {
+        const fmt = s => {
+            const m = Math.floor(s / 60);
+            const sec = Math.floor(s % 60);
+            return `${m}:${sec.toString().padStart(2, '0')}`;
+        };
+        timeLabel.textContent = `${fmt(current)} / ${fmt(duration)}`;
+    }
+
+    scrubber.addEventListener('input', () => {
+        isScrubbing = true;
+        seekToRatio(parseInt(scrubber.value) / 1000);
+    });
+
+    scrubber.addEventListener('change', () => {
+        isScrubbing = false;
+    });
+
+    // 视频 metadata 加载后更新时间
+    originalVideo.addEventListener('loadedmetadata', () => {
+        updateTimeLabel(0, originalVideo.duration);
+    });
+
+    // 组装
+    const container = document.createElement('div');
+    container.className = 'video-scrub-container';
+    container.appendChild(flexRow);
+    container.appendChild(scrubber);
+    container.appendChild(timeLabel);
+    framesGrid.appendChild(container);
 }
 
 // 显示指令信息
