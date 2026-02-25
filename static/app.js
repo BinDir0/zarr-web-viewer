@@ -636,6 +636,12 @@ function renderVideos(episodeId) {
     const framesGrid = document.getElementById('framesGrid');
     framesGrid.innerHTML = '';
 
+    // 清理上一次的 document-level 事件监听器
+    if (window._scrubCleanup) {
+        window._scrubCleanup();
+        window._scrubCleanup = null;
+    }
+
     // 外层 flex 容器
     const flexRow = document.createElement('div');
     flexRow.className = 'video-side-by-side';
@@ -700,12 +706,12 @@ function renderVideos(episodeId) {
     flexRow.appendChild(originalWrapper);
     flexRow.appendChild(renderedWrapper);
 
-    // 进度条 scrubber
+    // ========== 进度条 scrubber（基于真实秒数） ==========
     const scrubber = document.createElement('input');
     scrubber.type = 'range';
     scrubber.className = 'video-scrubber';
     scrubber.min = '0';
-    scrubber.max = '1000';
+    scrubber.max = '100';   // 临时值，loadedmetadata 后会更新为真实 duration * 100
     scrubber.value = '0';
     scrubber.step = '1';
 
@@ -714,94 +720,107 @@ function renderVideos(episodeId) {
     timeLabel.className = 'scrub-time-label';
     timeLabel.textContent = '0:00 / 0:00';
 
-    // scrub 逻辑：拖动时同步两个视频的 currentTime
+    // 状态
     let isScrubbing = false;
     let wasPlayingBeforeScrub = false;
+    let videoDuration = 0; // 真实时长（秒），由 loadedmetadata 设置
 
-    function seekToRatio(ratio) {
-        // 获取当前 DOM 中的所有 scrub-video（支持 reloadedVideos 场景）
-        const videos = framesGrid.querySelectorAll('.scrub-video');
-        let dur = 0;
-        videos.forEach(v => { if (v.duration && isFinite(v.duration)) dur = Math.max(dur, v.duration); });
-        if (!dur) return;
-        // clamp ratio to [0, 1] and avoid seeking past the last decodable frame
-        ratio = Math.max(0, Math.min(1, ratio));
-        const t = ratio * dur;
-        videos.forEach(v => { v.currentTime = Math.min(t, v.duration || dur); });
-        updateTimeLabel(t, dur);
+    function formatTime(s) {
+        const m = Math.floor(s / 60);
+        const sec = Math.floor(s % 60);
+        return `${m}:${sec.toString().padStart(2, '0')}`;
     }
 
     function updateTimeLabel(current, duration) {
-        const fmt = s => {
-            const m = Math.floor(s / 60);
-            const sec = Math.floor(s % 60);
-            return `${m}:${sec.toString().padStart(2, '0')}`;
-        };
-        timeLabel.textContent = `${fmt(current)} / ${fmt(duration)}`;
+        timeLabel.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
     }
 
-    // mousedown/touchstart: 开始拖拽，暂停视频防止 timeupdate 干扰
-    scrubber.addEventListener('mousedown', () => {
-        isScrubbing = true;
-        wasPlayingBeforeScrub = !originalVideo.paused;
-        if (wasPlayingBeforeScrub) {
-            originalVideo.pause();
-            renderedVideo.pause();
-        }
-    });
-    scrubber.addEventListener('touchstart', () => {
-        isScrubbing = true;
-        wasPlayingBeforeScrub = !originalVideo.paused;
-        if (wasPlayingBeforeScrub) {
-            originalVideo.pause();
-            renderedVideo.pause();
-        }
-    }, { passive: true });
-
-    scrubber.addEventListener('input', () => {
-        seekToRatio(parseInt(scrubber.value) / 1000);
-    });
-
-    // mouseup/touchend: 结束拖拽，恢复播放
-    function endScrub() {
-        if (!isScrubbing) return;
-        isScrubbing = false;
-        if (wasPlayingBeforeScrub) {
-            originalVideo.play();
-            renderedVideo.play();
-        }
+    // scrubber value → 秒：value 就是 centiseconds (duration * 100)
+    // 这样 step=1 对应 0.01 秒精度，足够细腻
+    function scrubberToTime() {
+        return parseFloat(scrubber.value) / 100;
     }
-    scrubber.addEventListener('mouseup', endScrub);
-    scrubber.addEventListener('touchend', endScrub);
-    // 也监听 document 的 mouseup，防止鼠标拖出 scrubber 后松开
-    document.addEventListener('mouseup', () => {
-        if (isScrubbing) endScrub();
-    });
 
-    // 视频 metadata 加载后更新时间并确保播放速率正确
+    function timeToScrubber(t) {
+        return Math.round(t * 100);
+    }
+
+    function seekBothVideos(timeSec) {
+        timeSec = Math.max(0, Math.min(timeSec, videoDuration));
+        originalVideo.currentTime = Math.min(timeSec, originalVideo.duration || videoDuration);
+        if (renderedVideo.duration && isFinite(renderedVideo.duration)) {
+            renderedVideo.currentTime = Math.min(timeSec, renderedVideo.duration);
+        }
+        updateTimeLabel(timeSec, videoDuration);
+    }
+
+    // ---- loadedmetadata: 用真实 duration 初始化 scrubber ----
     originalVideo.addEventListener('loadedmetadata', () => {
         originalVideo.playbackRate = 1.0;
-        updateTimeLabel(0, originalVideo.duration);
+        videoDuration = originalVideo.duration;
+        scrubber.max = String(timeToScrubber(videoDuration));
+        scrubber.value = '0';
+        updateTimeLabel(0, videoDuration);
     });
     renderedVideo.addEventListener('loadedmetadata', () => {
         renderedVideo.playbackRate = 1.0;
     });
 
-    // 播放时同步进度条和 rendered 视频
+    // ---- 拖拽开始：暂停视频，标记 scrubbing ----
+    function startScrub() {
+        isScrubbing = true;
+        wasPlayingBeforeScrub = !originalVideo.paused;
+        originalVideo.pause();
+        renderedVideo.pause();
+    }
+
+    // ---- 拖拽中：实时 seek ----
+    function onScrubInput() {
+        seekBothVideos(scrubberToTime());
+    }
+
+    // ---- 拖拽结束：恢复播放 ----
+    function endScrub() {
+        if (!isScrubbing) return;
+        isScrubbing = false;
+        // 最终 seek 一次确保精确
+        seekBothVideos(scrubberToTime());
+        if (wasPlayingBeforeScrub) {
+            originalVideo.play();
+            renderedVideo.play();
+        }
+    }
+
+    scrubber.addEventListener('mousedown', startScrub);
+    scrubber.addEventListener('touchstart', startScrub, { passive: true });
+    scrubber.addEventListener('input', onScrubInput);
+    scrubber.addEventListener('mouseup', endScrub);
+    scrubber.addEventListener('touchend', endScrub);
+
+    // document-level mouseup 兜底（鼠标拖出 scrubber 后松开）
+    function docMouseUp() { if (isScrubbing) endScrub(); }
+    document.addEventListener('mouseup', docMouseUp);
+
+    // 清理函数，下次 renderVideos 时调用
+    window._scrubCleanup = () => {
+        document.removeEventListener('mouseup', docMouseUp);
+    };
+
+    // ---- 播放时同步 scrubber + rendered ----
     originalVideo.addEventListener('timeupdate', () => {
-        if (isScrubbing) return;
+        if (isScrubbing) return; // 拖拽中不更新，避免冲突
+        const t = originalVideo.currentTime;
         const dur = originalVideo.duration;
         if (!dur || !isFinite(dur)) return;
-        const ratio = originalVideo.currentTime / dur;
-        scrubber.value = Math.round(ratio * 1000);
-        updateTimeLabel(originalVideo.currentTime, dur);
-        // 同步 rendered 视频
+        scrubber.value = String(timeToScrubber(t));
+        updateTimeLabel(t, dur);
+        // 同步 rendered
         if (renderedVideo.duration && isFinite(renderedVideo.duration)) {
-            renderedVideo.currentTime = Math.min(originalVideo.currentTime, renderedVideo.duration);
+            renderedVideo.currentTime = Math.min(t, renderedVideo.duration);
         }
     });
 
-    // 播放结束时两个视频都暂停
+    // 播放结束
     originalVideo.addEventListener('ended', () => {
         renderedVideo.pause();
     });
