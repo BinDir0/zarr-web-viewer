@@ -1762,7 +1762,7 @@ def api_episode_video_original(episode_id: str):
     
     # 使用 episode_id 的 hash 作为文件名
     import hashlib
-    video_hash = hashlib.md5(f"{episode_id}_original".encode()).hexdigest()
+    video_hash = hashlib.md5(f"{episode_id}_original_30fps".encode()).hexdigest()
     video_path = os.path.join(cache_dir, f"{video_hash}.mp4")
     
     # 如果缓存文件不存在，则生成
@@ -1772,7 +1772,7 @@ def api_episode_video_original(episode_id: str):
             
             # 生成原始视频（使用 depth 的分辨率）
             temp_video = video_path + ".tmp.mp4"
-            fps = 20  # 固定 20 FPS，足够流畅
+            fps = 30  # 原始数据集为 30 FPS
             create_video_from_frames(images, temp_video, fps=fps, 
                                    target_width=target_width, target_height=target_height, max_width=512)
             
@@ -1948,7 +1948,7 @@ def api_episode_video_rendered(episode_id: str):
     cleanup_video_cache(cache_dir, max_size_gb=10.0, max_age_days=7)
 
     import hashlib
-    video_hash = hashlib.md5(f"{episode_id}_rendered".encode()).hexdigest()
+    video_hash = hashlib.md5(f"{episode_id}_rendered_30fps".encode()).hexdigest()
     video_path = os.path.join(cache_dir, f"{video_hash}.mp4")
 
     # 如果缓存文件存在，直接返回
@@ -2070,7 +2070,7 @@ def api_episode_video_rendered(episode_id: str):
         print(f"✓ 并行渲染完成，耗时 {render_time:.2f}秒 ({num_frames/render_time:.1f} fps)")
 
         temp_video = video_path + ".tmp.mp4"
-        fps = 20
+        fps = 30
 
         target_width, target_height = None, None
         if "depth_shape" in episode_data and episode_data["depth_shape"] is not None:

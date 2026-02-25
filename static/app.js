@@ -64,7 +64,7 @@ function setupEventListeners() {
         nextBtn.addEventListener('click', navigateToNextEpisode);
     }
 
-    // 键盘快捷键：左右箭头导航 / 空格播放暂停
+    // 键盘快捷键：空格播放暂停
     document.addEventListener('keydown', (e) => {
         // 如果正在输入文本，不触发快捷键
         if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') {
@@ -75,14 +75,6 @@ function setupEventListeners() {
             e.preventDefault();
             toggleVideoPlayback();
             return;
-        }
-
-        if (e.key === 'ArrowLeft') {
-            e.preventDefault();
-            navigateToPrevEpisode();
-        } else if (e.key === 'ArrowRight') {
-            e.preventDefault();
-            navigateToNextEpisode();
         }
     });
 }
@@ -667,6 +659,8 @@ function renderVideos(episodeId) {
         v.preload = 'auto';
         v.muted = true;
         v.playsInline = true;
+        v.playbackRate = 1.0;
+        v.defaultPlaybackRate = 1.0;
         v.style.pointerEvents = 'none'; // 防止视频拦截进度条拖拽事件
         v.load();
     });
@@ -722,6 +716,7 @@ function renderVideos(episodeId) {
 
     // scrub 逻辑：拖动时同步两个视频的 currentTime
     let isScrubbing = false;
+    let wasPlayingBeforeScrub = false;
 
     function seekToRatio(ratio) {
         // 获取当前 DOM 中的所有 scrub-video（支持 reloadedVideos 场景）
@@ -745,18 +740,51 @@ function renderVideos(episodeId) {
         timeLabel.textContent = `${fmt(current)} / ${fmt(duration)}`;
     }
 
-    scrubber.addEventListener('input', () => {
+    // mousedown/touchstart: 开始拖拽，暂停视频防止 timeupdate 干扰
+    scrubber.addEventListener('mousedown', () => {
         isScrubbing = true;
+        wasPlayingBeforeScrub = !originalVideo.paused;
+        if (wasPlayingBeforeScrub) {
+            originalVideo.pause();
+            renderedVideo.pause();
+        }
+    });
+    scrubber.addEventListener('touchstart', () => {
+        isScrubbing = true;
+        wasPlayingBeforeScrub = !originalVideo.paused;
+        if (wasPlayingBeforeScrub) {
+            originalVideo.pause();
+            renderedVideo.pause();
+        }
+    }, { passive: true });
+
+    scrubber.addEventListener('input', () => {
         seekToRatio(parseInt(scrubber.value) / 1000);
     });
 
-    scrubber.addEventListener('change', () => {
+    // mouseup/touchend: 结束拖拽，恢复播放
+    function endScrub() {
+        if (!isScrubbing) return;
         isScrubbing = false;
+        if (wasPlayingBeforeScrub) {
+            originalVideo.play();
+            renderedVideo.play();
+        }
+    }
+    scrubber.addEventListener('mouseup', endScrub);
+    scrubber.addEventListener('touchend', endScrub);
+    // 也监听 document 的 mouseup，防止鼠标拖出 scrubber 后松开
+    document.addEventListener('mouseup', () => {
+        if (isScrubbing) endScrub();
     });
 
-    // 视频 metadata 加载后更新时间
+    // 视频 metadata 加载后更新时间并确保播放速率正确
     originalVideo.addEventListener('loadedmetadata', () => {
+        originalVideo.playbackRate = 1.0;
         updateTimeLabel(0, originalVideo.duration);
+    });
+    renderedVideo.addEventListener('loadedmetadata', () => {
+        renderedVideo.playbackRate = 1.0;
     });
 
     // 播放时同步进度条和 rendered 视频
