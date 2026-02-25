@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <title>审核管理后台 - Zarr 数据集查看器</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body class="admin-body">
+    <header>
+        <h1>审核管理后台</h1>
+        <div class="header-info">
+            <a href="/" class="back-link">← 返回查看器</a>
+            <span id="lastRefresh"></span>
+        </div>
+    </header>
+
+    <div class="admin-container">
+        <!-- 概览卡片 -->
+        <div class="stats-cards">
+            <div class="stat-card">
+                <div class="stat-number" id="totalAnnotations">-</div>
+                <div class="stat-label">总标注数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="totalReviewers">-</div>
+                <div class="stat-label">审核人数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="todayAnnotations">-</div>
+                <div class="stat-label">今日标注</div>
+            </div>
+        </div>
+
+        <!-- 审核人排行 -->
+        <div class="admin-section">
+            <h2>审核人统计</h2>
+            <table class="admin-table" id="reviewerTable">
+                <thead>
+                    <tr>
+                        <th>审核人</th>
+                        <th>今日标注</th>
+                        <th>总标注数</th>
+                        <th>最后提交时间</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <!-- 每日统计 -->
+        <div class="admin-section">
+            <h2>最近 7 天每日统计</h2>
+            <table class="admin-table" id="dailyTable">
+                <thead>
+                    <tr>
+                        <th>日期</th>
+                        <th>详情</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+    async function loadStats() {
+        try {
+            const resp = await fetch('/api/admin/stats');
+            if (!resp.ok) throw new Error('Failed to load stats');
+            const data = await resp.json();
+
+            document.getElementById('totalAnnotations').textContent = data.total_annotations;
+            document.getElementById('totalReviewers').textContent = data.total_reviewers;
+            document.getElementById('todayAnnotations').textContent = data.today_annotations;
+
+            // 审核人表格
+            const tbody = document.querySelector('#reviewerTable tbody');
+            tbody.innerHTML = '';
+            if (data.reviewers.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#999;">暂无数据</td></tr>';
+            } else {
+                data.reviewers.forEach(r => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td><strong>${escapeHtml(r.name)}</strong></td>
+                        <td>${r.today_count}</td>
+                        <td>${r.total_count}</td>
+                        <td>${formatTime(r.last_annotation_time)}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            }
+
+            // 每日统计表格
+            const dailyTbody = document.querySelector('#dailyTable tbody');
+            dailyTbody.innerHTML = '';
+            if (data.daily_stats.length === 0) {
+                dailyTbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#999;">暂无数据</td></tr>';
+            } else {
+                data.daily_stats.forEach(day => {
+                    const tr = document.createElement('tr');
+                    const details = Object.entries(day.reviewers)
+                        .map(([name, cnt]) => `${escapeHtml(name)}: ${cnt}`)
+                        .join('，');
+                    const total = Object.values(day.reviewers).reduce((a, b) => a + b, 0);
+                    tr.innerHTML = `
+                        <td><strong>${day.date}</strong></td>
+                        <td>${details}（共 ${total} 条）</td>
+                    `;
+                    dailyTbody.appendChild(tr);
+                });
+            }
+
+            document.getElementById('lastRefresh').textContent =
+                '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+        } catch (err) {
+            console.error('加载统计失败:', err);
+        }
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function formatTime(isoStr) {
+        if (!isoStr) return '-';
+        try {
+            const d = new Date(isoStr + 'Z');
+            return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+        } catch {
+            return isoStr;
+        }
+    }
+
+    // 初始加载 + 每 30 秒自动刷新
+    loadStats();
+    setInterval(loadStats, 30000);
+    </script>
+</body>
+</html>

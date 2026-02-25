@@ -149,6 +149,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE annotations ADD COLUMN is_valid INTEGER DEFAULT 1")  # 1=有效, 0=有问题
         except:
             pass
+        try:
+            conn.execute("ALTER TABLE annotations ADD COLUMN reviewer_name TEXT")  # 审核人姓名
+        except:
+            pass
         
         # 查看记录表：记录谁查看了哪个episode
         conn.execute(
@@ -2119,10 +2123,10 @@ def api_get_annotation(episode_id: str):
     """获取episode的标注（包含结构化问题列表）"""
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT content, updated_at, issues, additional_notes, is_valid FROM annotations WHERE episode_id = ?",
+        "SELECT content, updated_at, issues, additional_notes, is_valid, reviewer_name FROM annotations WHERE episode_id = ?",
         (episode_id,),
     ).fetchone()
-    
+
     if row is None:
         return jsonify({
             "episode_id": episode_id,
@@ -2131,6 +2135,7 @@ def api_get_annotation(episode_id: str):
             "issues": [],
             "additional_notes": "",
             "is_valid": 1,
+            "reviewer_name": "",
         })
     
     # 解析 JSON 格式的 issues
@@ -2148,6 +2153,7 @@ def api_get_annotation(episode_id: str):
         "issues": issues,
         "additional_notes": row["additional_notes"] or "",
         "is_valid": row["is_valid"] if row["is_valid"] is not None else 1,
+        "reviewer_name": row["reviewer_name"] or "",
     })
 
 
@@ -2456,16 +2462,17 @@ def api_set_annotation(episode_id: str):
     issues = data.get("issues", [])  # 问题列表，如 ["动作标注不佳", "缺手"]
     additional_notes = data.get("additional_notes", "")  # 额外说明
     is_valid = 1 if len(issues) == 0 else 0  # 没有问题则标记为有效
-    
+    reviewer_name = data.get("reviewer_name", "")  # 审核人姓名
+
     conn = get_db_connection()
     conn.execute(
         """
         INSERT INTO annotations (
-            episode_id, episode_name, dataset_name, episode_index, 
-            content, issues, additional_notes, is_valid, updated_at
+            episode_id, episode_name, dataset_name, episode_index,
+            content, issues, additional_notes, is_valid, reviewer_name, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(episode_id) DO UPDATE SET 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(episode_id) DO UPDATE SET
             episode_name = excluded.episode_name,
             dataset_name = excluded.dataset_name,
             episode_index = excluded.episode_index,
@@ -2473,15 +2480,100 @@ def api_set_annotation(episode_id: str):
             issues = excluded.issues,
             additional_notes = excluded.additional_notes,
             is_valid = excluded.is_valid,
+            reviewer_name = excluded.reviewer_name,
             updated_at = excluded.updated_at
         """,
-        (episode_id, episode_name, dataset_name, episode_index, 
-         content, json_module.dumps(issues, ensure_ascii=False), additional_notes, is_valid, 
-         datetime.utcnow().isoformat()),
+        (episode_id, episode_name, dataset_name, episode_index,
+         content, json_module.dumps(issues, ensure_ascii=False), additional_notes, is_valid,
+         reviewer_name, datetime.utcnow().isoformat()),
     )
     conn.commit()
     
     return jsonify({"ok": True, "is_valid": is_valid})
+
+
+@app.route("/admin")
+def admin_page():
+    """管理后台页面"""
+    return render_template("admin.html")
+
+
+@app.route("/api/admin/stats")
+def api_admin_stats():
+    """管理后台统计数据"""
+    conn = get_db_connection()
+
+    # 总标注数
+    total_annotations = conn.execute("SELECT COUNT(*) FROM annotations").fetchone()[0]
+
+    # 总审核人数（去重，排除空值）
+    total_reviewers = conn.execute(
+        "SELECT COUNT(DISTINCT reviewer_name) FROM annotations WHERE reviewer_name IS NOT NULL AND reviewer_name != ''"
+    ).fetchone()[0]
+
+    # 今日标注数
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today_annotations = conn.execute(
+        "SELECT COUNT(*) FROM annotations WHERE substr(updated_at, 1, 10) = ?",
+        (today,),
+    ).fetchone()[0]
+
+    # 每个审核人的统计
+    reviewer_rows = conn.execute(
+        """
+        SELECT
+            reviewer_name,
+            COUNT(*) as total_count,
+            SUM(CASE WHEN substr(updated_at, 1, 10) = ? THEN 1 ELSE 0 END) as today_count,
+            MAX(updated_at) as last_annotation_time
+        FROM annotations
+        WHERE reviewer_name IS NOT NULL AND reviewer_name != ''
+        GROUP BY reviewer_name
+        ORDER BY total_count DESC
+        """,
+        (today,),
+    ).fetchall()
+
+    reviewers = []
+    for row in reviewer_rows:
+        reviewers.append({
+            "name": row["reviewer_name"],
+            "total_count": row["total_count"],
+            "today_count": row["today_count"],
+            "last_annotation_time": row["last_annotation_time"],
+        })
+
+    # 最近 7 天每日统计
+    daily_rows = conn.execute(
+        """
+        SELECT
+            substr(updated_at, 1, 10) as date,
+            reviewer_name,
+            COUNT(*) as cnt
+        FROM annotations
+        WHERE reviewer_name IS NOT NULL AND reviewer_name != ''
+          AND updated_at >= date('now', '-7 days')
+        GROUP BY date, reviewer_name
+        ORDER BY date DESC
+        """
+    ).fetchall()
+
+    daily_map = {}
+    for row in daily_rows:
+        d = row["date"]
+        if d not in daily_map:
+            daily_map[d] = {}
+        daily_map[d][row["reviewer_name"]] = row["cnt"]
+
+    daily_stats = [{"date": d, "reviewers": r} for d, r in sorted(daily_map.items(), reverse=True)]
+
+    return jsonify({
+        "total_annotations": total_annotations,
+        "total_reviewers": total_reviewers,
+        "today_annotations": today_annotations,
+        "reviewers": reviewers,
+        "daily_stats": daily_stats,
+    })
 
 
 def main():
@@ -2489,6 +2581,7 @@ def main():
     load_bad_episodes_cache()  # 预加载 sanity check 结果
     print(f"启动服务器在端口 {SERVER_PORT}")
     print(f"访问: http://localhost:{SERVER_PORT}")
+    print(f"管理后台: http://localhost:{SERVER_PORT}/admin")
     app.run(host="0.0.0.0", port=SERVER_PORT, debug=DEBUG_MODE)
 
 

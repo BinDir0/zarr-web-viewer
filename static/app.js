@@ -27,6 +27,9 @@ let savedAnnotationState = {
 
 let initialAnnotationState = null;  // 页面加载时的初始状态
 
+// 审核人姓名
+let reviewerName = localStorage.getItem('reviewer_name') || '';
+
 // 生成或获取用户ID
 function getUserId() {
     if (!userId) {
@@ -42,10 +45,55 @@ function getUserId() {
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
+    // 检查是否需要显示审核人姓名 modal
+    if (!reviewerName) {
+        showReviewerModal();
+    } else {
+        updateReviewerDisplay();
+    }
     getUserId();  // 确保有用户ID
     loadEpisodes();
     setupEventListeners();
 });
+
+// 审核人姓名 Modal 逻辑
+function showReviewerModal() {
+    const modal = document.getElementById('reviewerModal');
+    const input = document.getElementById('reviewerNameInput');
+    const btn = document.getElementById('reviewerModalConfirm');
+    if (!modal) return;
+
+    modal.style.display = 'flex';
+    input.focus();
+
+    input.addEventListener('input', () => {
+        btn.disabled = !input.value.trim();
+    });
+
+    btn.addEventListener('click', () => {
+        confirmReviewerName(input.value.trim());
+    });
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && input.value.trim()) {
+            confirmReviewerName(input.value.trim());
+        }
+    });
+}
+
+function confirmReviewerName(name) {
+    reviewerName = name;
+    localStorage.setItem('reviewer_name', name);
+    document.getElementById('reviewerModal').style.display = 'none';
+    updateReviewerDisplay();
+}
+
+function updateReviewerDisplay() {
+    const el = document.getElementById('reviewerDisplay');
+    if (el && reviewerName) {
+        el.textContent = '审核人: ' + reviewerName;
+    }
+}
 
 // 设置事件监听器
 function setupEventListeners() {
@@ -1011,12 +1059,13 @@ async function saveAnnotation() {
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ 
+            body: JSON.stringify({
                 issues: issues,
                 additional_notes: additionalNotes,
                 episode_name: window.currentEpisodeInfo.name,
                 dataset_name: window.currentEpisodeInfo.dataset,
                 episode_index: window.currentEpisodeInfo.index,
+                reviewer_name: reviewerName,
                 // 保留旧字段向后兼容
                 content: issues.length > 0 ? `问题: ${issues.join(', ')}` : '质量良好'
             }),

@@ -6,11 +6,22 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
+    <!-- 审核人姓名 Modal -->
+    <div class="modal-overlay" id="reviewerModal">
+        <div class="modal-content">
+            <h3>请输入您的姓名</h3>
+            <p>姓名将记录在每条评估中，方便追踪审核进度。</p>
+            <input type="text" id="reviewerNameInput" placeholder="请输入姓名..." autocomplete="off">
+            <button id="reviewerModalConfirm" class="btn-primary" disabled>确认</button>
+        </div>
+    </div>
+
     <header>
         <h1>Zarr 数据集查看器</h1>
         <div class="header-info">
             <span id="datasetPath">数据集路径: 加载中...</span>
             <span id="preloadStatus" style="margin-left: 20px; color: #2196F3;"></span>
+            <span id="reviewerDisplay" class="reviewer-display"></span>
         </div>
     </header>
 
