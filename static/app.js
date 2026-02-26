@@ -12,6 +12,10 @@ let isPreloading = false;
 let maxConcurrentPreload = 2; // 最大并发预加载数（降低以避免带宽占用过多）
 let activePreloadCount = 0; // 当前正在预加载的数量
 
+// Batch 预加载控制
+const BATCH_SIZE = 30; // 每个 batch 预加载 30 个 episode
+let currentBatchStart = 0; // 当前 batch 的起始索引
+
 // 翻译预加载相关
 let translationQueue = []; // 翻译队列
 let activeTranslationCount = 0; // 当前正在翻译的数量
@@ -340,9 +344,9 @@ function processPreloadQueue() {
     }
 }
 
-// 启动预加载（预加载所有episodes，按顺序）
+// 启动预加载（只加载当前 batch）
 function startPreloading() {
-    console.log(`🔍 startPreloading 被调用, allEpisodes.length=${allEpisodes.length}`);
+    console.log(`🔍 startPreloading 被调用, allEpisodes.length=${allEpisodes.length}, batchStart=${currentBatchStart}`);
     
     if (allEpisodes.length === 0) {
         console.warn('⚠️ allEpisodes 为空，无法预加载');
@@ -355,47 +359,46 @@ function startPreloading() {
         return;
     }
     
-    // 将所有未预加载的episodes加入队列（按顺序）
+    // 只加载当前 batch 范围内的 episodes
+    const batchEnd = Math.min(currentBatchStart + BATCH_SIZE, allEpisodes.length);
     preloadQueue = [];
     let addedCount = 0;
     
-    console.log('📝 开始构建预加载队列...');
-    for (const episode of allEpisodes) {
-        // episode.id 而不是 episode.episode_id
+    console.log(`📝 构建 batch 预加载队列 [${currentBatchStart}-${batchEnd - 1}]...`);
+    for (let i = currentBatchStart; i < batchEnd; i++) {
+        const episode = allEpisodes[i];
         if (!preloadedVideos.has(episode.id)) {
             preloadQueue.push(episode.id);
             addedCount++;
-            if (addedCount <= 3) {
-                console.log(`  + 添加到队列: ${episode.id}`);
-            }
         }
     }
     
     if (addedCount === 0) {
-        console.log('✓ 所有episodes已预加载');
+        console.log('✓ 当前 batch 已全部预加载');
         return;
     }
     
-    console.log(`🚀 开始后台预加载所有视频: ${addedCount} 个episodes (并发数: ${maxConcurrentPreload})`);
-    console.log(`   队列前3个: ${preloadQueue.slice(0, 3).join(', ')}`);
+    console.log(`🚀 开始预加载 batch [${currentBatchStart}-${batchEnd - 1}]: ${addedCount} 个episodes`);
     
     // 立即开始预加载（多个并发）
     for (let i = 0; i < maxConcurrentPreload && preloadQueue.length > 0; i++) {
-        console.log(`   启动并发任务 ${i + 1}/${maxConcurrentPreload}`);
         setTimeout(() => processPreloadQueue(), i * 100);
     }
 }
 
-// 清理过期的预加载缓存
-function cleanupPreloadCache() {
-    const maxAge = 10 * 60 * 1000; // 10分钟
-    const maxCount = 20; // 最多保留20个预加载的视频元素
-    const now = Date.now();
+// 清理上一个 batch 的预加载缓存
+function cleanupPreviousBatch() {
+    if (currentBatchStart === 0) return; // 第一个 batch 没有上一个
     
-    // 清理过期的
-    for (const [episodeId, data] of preloadedVideos.entries()) {
-        if (now - data.timestamp > maxAge) {
-            // 释放 video 元素
+    const prevStart = currentBatchStart - BATCH_SIZE;
+    const prevEnd = currentBatchStart;
+    let cleaned = 0;
+    
+    for (let i = Math.max(0, prevStart); i < prevEnd && i < allEpisodes.length; i++) {
+        const episodeId = allEpisodes[i].id;
+        const data = preloadedVideos.get(episodeId);
+        if (data) {
+            // 释放 video 元素内存
             if (data.originalVideo) {
                 data.originalVideo.src = '';
                 data.originalVideo.load();
@@ -405,28 +408,29 @@ function cleanupPreloadCache() {
                 data.renderedVideo.load();
             }
             preloadedVideos.delete(episodeId);
-            console.log(`🗑️ 清理过期预加载: ${episodeId}`);
+            cleaned++;
         }
     }
     
-    // 如果数量过多，清理最旧的
-    if (preloadedVideos.size > maxCount) {
-        const entries = Array.from(preloadedVideos.entries())
-            .sort((a, b) => a[1].timestamp - b[1].timestamp);
-        
-        const toDelete = entries.slice(0, preloadedVideos.size - maxCount);
-        for (const [episodeId, data] of toDelete) {
-            if (data.originalVideo) {
-                data.originalVideo.src = '';
-                data.originalVideo.load();
-            }
-            if (data.renderedVideo) {
-                data.renderedVideo.src = '';
-                data.renderedVideo.load();
-            }
-            preloadedVideos.delete(episodeId);
-            console.log(`🗑️ 清理多余预加载: ${episodeId}`);
-        }
+    if (cleaned > 0) {
+        console.log(`🗑️ 清理上一个 batch 缓存: ${cleaned} 个episodes`);
+    }
+}
+
+// 检查是否需要切换到下一个 batch（当用户浏览到当前 batch 的后半段时触发）
+function checkBatchBoundary() {
+    if (!currentEpisodeId || allEpisodes.length === 0) return;
+    
+    const currentIdx = allEpisodes.findIndex(e => e.id === currentEpisodeId);
+    if (currentIdx < 0) return;
+    
+    const batchEnd = currentBatchStart + BATCH_SIZE;
+    // 当浏览到当前 batch 最后 5 个时，切换到下一个 batch
+    if (currentIdx >= batchEnd - 5 && batchEnd < allEpisodes.length) {
+        console.log(`📦 接近 batch 边界 (当前: ${currentIdx}, batch结束: ${batchEnd})，切换到下一个 batch`);
+        currentBatchStart = batchEnd;
+        cleanupPreviousBatch();
+        startPreloading();
     }
 }
 
@@ -660,6 +664,9 @@ async function selectEpisode(episodeId, episodeName, datasetName, episodeIndex) 
     }
     
     currentEpisodeId = episodeId;
+    
+    // 检查是否需要切换 batch
+    checkBatchBoundary();
     
     // 重置提交状态
     savedAnnotationState = {
