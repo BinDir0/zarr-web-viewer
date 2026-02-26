@@ -2492,6 +2492,29 @@ def api_set_annotation(episode_id: str):
     return jsonify({"ok": True, "is_valid": is_valid})
 
 
+@app.route("/api/my-stats")
+def api_my_stats():
+    """获取当前审核员的个人统计"""
+    reviewer = request.args.get("reviewer", "").strip()
+    if not reviewer:
+        return jsonify({"total": 0, "today": 0})
+    
+    conn = get_db_connection()
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    
+    total = conn.execute(
+        "SELECT COUNT(*) FROM annotations WHERE reviewer_name = ?",
+        (reviewer,),
+    ).fetchone()[0]
+    
+    today_count = conn.execute(
+        "SELECT COUNT(*) FROM annotations WHERE reviewer_name = ? AND substr(updated_at, 1, 10) = ?",
+        (reviewer, today),
+    ).fetchone()[0]
+    
+    return jsonify({"total": total, "today": today_count})
+
+
 @app.route("/admin")
 def admin_page():
     """管理后台页面"""

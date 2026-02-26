@@ -53,6 +53,7 @@ document.addEventListener('DOMContentLoaded', () => {
         showReviewerModal();
     } else {
         updateReviewerDisplay();
+        updateMyStats();
     }
     getUserId();  // 确保有用户ID
     loadEpisodes();
@@ -89,12 +90,27 @@ function confirmReviewerName(name) {
     localStorage.setItem('reviewer_name', name);
     document.getElementById('reviewerModal').style.display = 'none';
     updateReviewerDisplay();
+    updateMyStats();
 }
 
 function updateReviewerDisplay() {
     const el = document.getElementById('reviewerDisplay');
     if (el && reviewerName) {
         el.textContent = '审核人: ' + reviewerName;
+    }
+}
+
+async function updateMyStats() {
+    if (!reviewerName) return;
+    try {
+        const resp = await fetch(`/api/my-stats?reviewer=${encodeURIComponent(reviewerName)}`);
+        const data = await resp.json();
+        const el = document.getElementById('reviewerDisplay');
+        if (el && reviewerName) {
+            el.textContent = `审核人: ${reviewerName} | 今日: ${data.today} 条 | 累计: ${data.total} 条`;
+        }
+    } catch (e) {
+        console.error('获取个人统计失败:', e);
     }
 }
 
@@ -1235,6 +1251,9 @@ async function saveAnnotation() {
             status.className = 'status-message warning';
         }
         status.textContent = statusText;
+        
+        // 刷新个人统计
+        updateMyStats();
         
         // 标记为已提交
         savedAnnotationState = {
