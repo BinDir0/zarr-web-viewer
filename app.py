@@ -2556,18 +2556,20 @@ def api_admin_stats():
     """管理后台统计数据"""
     conn = get_db_connection()
 
-    # 总标注数
-    total_annotations = conn.execute("SELECT COUNT(*) FROM annotations").fetchone()[0]
+    # 总标注数（只统计有审核人的）
+    total_annotations = conn.execute("SELECT COUNT(*) FROM annotations WHERE reviewer_name IS NOT NULL AND reviewer_name != ''").fetchone()[0]
 
     # 总审核人数（去重，排除空值）
     total_reviewers = conn.execute(
         "SELECT COUNT(DISTINCT reviewer_name) FROM annotations WHERE reviewer_name IS NOT NULL AND reviewer_name != ''"
     ).fetchone()[0]
 
-    # 今日标注数
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    # 今日标注数（UTC+8）
+    from datetime import timezone, timedelta
+    utc8 = timezone(timedelta(hours=8))
+    today = datetime.now(utc8).strftime("%Y-%m-%d")
     today_annotations = conn.execute(
-        "SELECT COUNT(*) FROM annotations WHERE substr(updated_at, 1, 10) = ?",
+        "SELECT COUNT(*) FROM annotations WHERE substr(updated_at, 1, 10) = ? AND reviewer_name IS NOT NULL AND reviewer_name != ''",
         (today,),
     ).fetchone()[0]
 
