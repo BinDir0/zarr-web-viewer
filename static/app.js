@@ -1151,13 +1151,62 @@ function renderTranslationItems(translations, originalInstructions) {
         label.appendChild(numSpan);
         label.appendChild(textSpan);
         
-        // checkbox 切换标记样式
+        // 错误详情面板（勾选后展开）
+        const detailDiv = document.createElement('div');
+        detailDiv.className = 'trans-error-detail';
+        detailDiv.style.display = 'none';
+        
+        const errorTypes = ['方位有问题', '物品有问题', '动作有问题', '其他'];
+        errorTypes.forEach(errType => {
+            const errLabel = document.createElement('label');
+            errLabel.className = 'trans-error-type-item';
+            
+            const errCb = document.createElement('input');
+            errCb.type = 'checkbox';
+            errCb.className = 'trans-error-type-checkbox';
+            errCb.dataset.index = idx;
+            errCb.dataset.errorType = errType;
+            
+            const errSpan = document.createElement('span');
+            errSpan.textContent = errType;
+            
+            errLabel.appendChild(errCb);
+            errLabel.appendChild(errSpan);
+            detailDiv.appendChild(errLabel);
+            
+            // "其他"选项：勾选后展开输入框
+            if (errType === '其他') {
+                const otherInput = document.createElement('input');
+                otherInput.type = 'text';
+                otherInput.className = 'trans-error-other-input';
+                otherInput.placeholder = '请说明具体问题...';
+                otherInput.dataset.index = idx;
+                otherInput.style.display = 'none';
+                
+                errCb.addEventListener('change', () => {
+                    otherInput.style.display = errCb.checked ? 'block' : 'none';
+                    if (errCb.checked) otherInput.focus();
+                });
+                
+                detailDiv.appendChild(otherInput);
+            }
+        });
+        
+        // checkbox 切换标记样式 + 展开详情
         checkbox.addEventListener('change', () => {
             item.classList.toggle('trans-marked-error', checkbox.checked);
+            detailDiv.style.display = checkbox.checked ? 'block' : 'none';
+            if (!checkbox.checked) {
+                // 取消勾选时清空子选项
+                detailDiv.querySelectorAll('.trans-error-type-checkbox').forEach(cb => cb.checked = false);
+                const otherInput = detailDiv.querySelector('.trans-error-other-input');
+                if (otherInput) { otherInput.value = ''; otherInput.style.display = 'none'; }
+            }
         });
         
         item.appendChild(checkbox);
         item.appendChild(label);
+        item.appendChild(detailDiv);
         listDiv.appendChild(item);
     });
 }
@@ -1249,11 +1298,24 @@ async function saveAnnotation() {
                 const checkbox = document.querySelector(`#transError_${t.index}`);
                 const isMarkedError = checkbox && checkbox.checked;
                 
+                // 收集错误类型
+                const errorTypes = [];
+                let otherText = '';
+                if (isMarkedError) {
+                    document.querySelectorAll(`.trans-error-type-checkbox[data-index="${t.index}"]:checked`).forEach(cb => {
+                        errorTypes.push(cb.dataset.errorType);
+                    });
+                    const otherInput = document.querySelector(`.trans-error-other-input[data-index="${t.index}"]`);
+                    if (otherInput) otherText = otherInput.value.trim();
+                }
+                
                 return {
                     index: t.index,
                     original: t.original,
                     translation: t.translation,
-                    is_edited: isMarkedError
+                    is_edited: isMarkedError,
+                    error_types: errorTypes,
+                    other_detail: otherText
                 };
             });
             

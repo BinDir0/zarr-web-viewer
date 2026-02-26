@@ -811,29 +811,51 @@ header h1 {
     flex: 1;
 }
 
-.trans-correction {
+.trans-error-detail {
     width: 100%;
     padding-left: 42px;
     margin-top: 0.3rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
 }
 
-.trans-correction-input {
+.trans-error-type-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: #555;
+}
+
+.trans-error-type-item:hover {
+    color: #e65100;
+}
+
+.trans-error-type-checkbox {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+}
+
+.trans-error-other-input {
     width: 100%;
     padding: 0.4rem 0.6rem;
     border: 2px solid #ff9800;
     border-radius: 6px;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     font-family: inherit;
     background: #fff;
-    transition: border-color 0.2s;
+    margin-top: 0.2rem;
 }
 
-.trans-correction-input:focus {
+.trans-error-other-input:focus {
     outline: none;
     border-color: #e65100;
 }
 
-.trans-correction-input::placeholder {
+.trans-error-other-input::placeholder {
     color: #bbb;
 }
 
