@@ -164,6 +164,16 @@ function setupEventListeners() {
         nextBtn.addEventListener('click', navigateToNextEpisode);
     }
 
+    // 顶部"换一批"按钮
+    const headerRefreshBtn = document.getElementById('headerRefreshBtn');
+    if (headerRefreshBtn) {
+        headerRefreshBtn.addEventListener('click', () => {
+            cleanupAllPreloadCache();
+            currentBatchStart = 0;
+            loadEpisodes(false);
+        });
+    }
+
     // 键盘快捷键：空格播放暂停
     document.addEventListener('keydown', (e) => {
         // 如果正在输入文本，不触发快捷键
@@ -479,26 +489,17 @@ async function loadEpisodes(append = false) {
                 const hasUnviewed = data.datasets.some(ds => ds.unviewed_episodes > 0);
                 
                 if (hasUnviewed) {
-                    // 添加"获取新批次"按钮
-                    const loadMoreContainer = document.createElement('div');
-                    loadMoreContainer.className = 'load-more-container';
-                    loadMoreContainer.innerHTML = `
-                        <button class="load-more-btn refresh-btn" id="refreshBtn">
-                            🔄 随机获取新的一批 (${currentLimit} 个)
-                        </button>
-                        <div class="hint-text">💡 从所有数据集中随机加载 ${currentLimit} 个未被任何人查看过的 episodes</div>
-                    `;
-                    episodeList.appendChild(loadMoreContainer);
-                    
-                    document.getElementById('refreshBtn').addEventListener('click', () => {
-                        // 清理当前所有视频缓存
-                        cleanupAllPreloadCache();
-                        // 重置 batch
-                        currentBatchStart = 0;
-                        loadEpisodes(false);  // 不追加，而是替换
-                    });
+                    // 显示顶部"换一批"按钮
+                    const headerBtn = document.getElementById('headerRefreshBtn');
+                    if (headerBtn) {
+                        headerBtn.style.display = 'inline-block';
+                    }
                 } else {
-                    // 所有都已查看
+                    // 所有都已查看，隐藏按钮
+                    const headerBtn = document.getElementById('headerRefreshBtn');
+                    if (headerBtn) {
+                        headerBtn.style.display = 'none';
+                    }
                     const noMoreContainer = document.createElement('div');
                     noMoreContainer.className = 'load-more-container';
                     noMoreContainer.innerHTML = `

@@ -1317,6 +1317,22 @@ header h1 {
 }
 
 /* 审核人显示 */
+.header-refresh-btn {
+    margin-left: 15px;
+    padding: 0.3rem 0.8rem;
+    background: rgba(255, 255, 255, 0.2);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 4px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.header-refresh-btn:hover {
+    background: rgba(255, 255, 255, 0.35);
+}
+
 .reviewer-display {
     margin-left: 20px;
     padding: 0.3rem 0.8rem;
