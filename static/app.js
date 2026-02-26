@@ -805,6 +805,16 @@ function renderVideos(episodeId) {
         renderedLabel.style.color = '#f44336';
     });
 
+    // 点击视频画面播放/暂停（两个视频同步）
+    [originalWrapper, renderedWrapper].forEach(wrapper => {
+        wrapper.style.cursor = 'pointer';
+        wrapper.addEventListener('click', (e) => {
+            // 不拦截进度条等控件的点击
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+            toggleVideoPlayback();
+        });
+    });
+
     flexRow.appendChild(originalWrapper);
     flexRow.appendChild(renderedWrapper);
 
