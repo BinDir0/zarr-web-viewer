@@ -2498,6 +2498,59 @@ def admin_page():
     return render_template("admin.html")
 
 
+@app.route("/api/user/stats", methods=["GET"])
+def api_user_stats():
+    """获取当前用户的审核统计（今日 & 总计，按 UTC+8 计算）"""
+    reviewer_name = request.args.get('reviewer_name', default=None, type=str)
+    
+    if not reviewer_name:
+        return jsonify({"success": False, "error": "缺少 reviewer_name 参数"}), 400
+    
+    conn = get_db_connection()
+    
+    # 计算 UTC+8 的今日日期
+    from datetime import timedelta
+    utc_now = datetime.utcnow()
+    utc8_now = utc_now + timedelta(hours=8)
+    today_utc8 = utc8_now.strftime("%Y-%m-%d")
+    
+    # 获取该用户的所有标注记录
+    rows = conn.execute(
+        """
+        SELECT updated_at 
+        FROM annotations 
+        WHERE reviewer_name = ?
+        ORDER BY updated_at DESC
+        """,
+        (reviewer_name,)
+    ).fetchall()
+    
+    # 统计总数和今日数
+    total_count = len(rows)
+    today_count = 0
+    
+    for row in rows:
+        # 将 UTC 时间转换为 UTC+8
+        try:
+            utc_time = datetime.fromisoformat(row["updated_at"].replace('Z', '+00:00'))
+            utc8_time = utc_time + timedelta(hours=8)
+            date_utc8 = utc8_time.strftime("%Y-%m-%d")
+            
+            if date_utc8 == today_utc8:
+                today_count += 1
+        except Exception as e:
+            print(f"解析时间失败: {e}")
+            continue
+    
+    return jsonify({
+        "success": True,
+        "reviewer_name": reviewer_name,
+        "total_count": total_count,
+        "today_count": today_count,
+        "today_date": today_utc8,
+    })
+
+
 @app.route("/api/admin/stats")
 def api_admin_stats():
     """管理后台统计数据"""

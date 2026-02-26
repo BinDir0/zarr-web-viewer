@@ -32,6 +32,25 @@ header h1 {
 .header-info {
     font-size: 0.9rem;
     opacity: 0.9;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+/* 用户统计显示样式 */
+.user-stats-display {
+    background: rgba(255, 255, 255, 0.2);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-weight: 500;
+    backdrop-filter: blur(10px);
+}
+
+.user-stats-display strong {
+    font-size: 1.1em;
+    font-weight: 700;
+    color: #ffd700;
 }
 
 .layout {
