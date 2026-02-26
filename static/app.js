@@ -1139,7 +1139,7 @@ function renderTranslationItems(translations, originalInstructions) {
         detailDiv.className = 'trans-error-detail';
         detailDiv.style.display = 'none';
         
-        const errorTypes = ['方位有问题', '物品有问题', '动作有问题', '乱码', '其他'];
+        const errorTypes = ['方位有问题', '物品有问题', '动作有问题', '指代不明确', '乱码', '其他'];
         errorTypes.forEach(errType => {
             const errLabel = document.createElement('label');
             errLabel.className = 'trans-error-type-item';
