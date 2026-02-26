@@ -1106,31 +1106,13 @@ function renderTranslationItems(translations, originalInstructions) {
         label.appendChild(numSpan);
         label.appendChild(textSpan);
         
-        // 修正输入框（勾选后展开）
-        const correctionDiv = document.createElement('div');
-        correctionDiv.className = 'trans-correction';
-        correctionDiv.style.display = 'none';
-        
-        const correctionInput = document.createElement('input');
-        correctionInput.type = 'text';
-        correctionInput.className = 'trans-correction-input';
-        correctionInput.placeholder = '输入修正翻译（可选）';
-        correctionInput.dataset.index = idx;
-        
-        correctionDiv.appendChild(correctionInput);
-        
-        // checkbox 切换展开修正框
+        // checkbox 切换标记样式
         checkbox.addEventListener('change', () => {
-            correctionDiv.style.display = checkbox.checked ? 'block' : 'none';
             item.classList.toggle('trans-marked-error', checkbox.checked);
-            if (checkbox.checked) {
-                correctionInput.focus();
-            }
         });
         
         item.appendChild(checkbox);
         item.appendChild(label);
-        item.appendChild(correctionDiv);
         listDiv.appendChild(item);
     });
 }
@@ -1220,14 +1202,12 @@ async function saveAnnotation() {
         if (hasTranslationFeedback && currentTranslations.length > 0) {
             const translations = currentTranslations.map(t => {
                 const checkbox = document.querySelector(`#transError_${t.index}`);
-                const correctionInput = document.querySelector(`.trans-correction-input[data-index="${t.index}"]`);
                 const isMarkedError = checkbox && checkbox.checked;
-                const correction = correctionInput ? correctionInput.value.trim() : '';
                 
                 return {
                     index: t.index,
                     original: t.original,
-                    translation: (isMarkedError && correction) ? correction : t.translation,
+                    translation: t.translation,
                     is_edited: isMarkedError
                 };
             });
