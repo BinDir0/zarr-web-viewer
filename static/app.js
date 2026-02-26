@@ -33,6 +33,13 @@ let currentTranslations = []; // [{index, original, translation}]
 // 审核人姓名
 let reviewerName = localStorage.getItem('reviewer_name') || '';
 
+// 用户统计数据
+let userStats = {
+    total_count: 0,
+    today_count: 0,
+    today_date: ''
+};
+
 // 生成或获取用户ID
 function getUserId() {
     if (!userId) {
@@ -46,6 +53,42 @@ function getUserId() {
     return userId;
 }
 
+// 加载用户统计数据
+async function loadUserStats() {
+    if (!reviewerName) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/user/stats?reviewer_name=${encodeURIComponent(reviewerName)}`);
+        const data = await response.json();
+        
+        if (data.success) {
+            userStats = {
+                total_count: data.total_count,
+                today_count: data.today_count,
+                today_date: data.today_date
+            };
+            updateUserStatsDisplay();
+        }
+    } catch (error) {
+        console.error('加载用户统计失败:', error);
+    }
+}
+
+// 更新用户统计显示
+function updateUserStatsDisplay() {
+    const el = document.getElementById('userStatsDisplay');
+    if (!el || !reviewerName) {
+        return;
+    }
+    
+    el.innerHTML = `📊 今日审核: <strong>${userStats.today_count}</strong> 条 | 总计: <strong>${userStats.total_count}</strong> 条`;
+    el.style.marginLeft = '20px';
+    el.style.color = '#fff';
+    el.style.fontWeight = '500';
+}
+
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
     // 检查是否需要显示审核人姓名 modal
@@ -53,7 +96,7 @@ document.addEventListener('DOMContentLoaded', () => {
         showReviewerModal();
     } else {
         updateReviewerDisplay();
-        updateMyStats();
+        loadUserStats();  // 加载用户统计
     }
     getUserId();  // 确保有用户ID
     loadEpisodes();
@@ -90,27 +133,13 @@ function confirmReviewerName(name) {
     localStorage.setItem('reviewer_name', name);
     document.getElementById('reviewerModal').style.display = 'none';
     updateReviewerDisplay();
-    updateMyStats();
+    loadUserStats();  // 加载用户统计
 }
 
 function updateReviewerDisplay() {
     const el = document.getElementById('reviewerDisplay');
     if (el && reviewerName) {
         el.textContent = '审核人: ' + reviewerName;
-    }
-}
-
-async function updateMyStats() {
-    if (!reviewerName) return;
-    try {
-        const resp = await fetch(`/api/my-stats?reviewer=${encodeURIComponent(reviewerName)}`);
-        const data = await resp.json();
-        const el = document.getElementById('reviewerDisplay');
-        if (el && reviewerName) {
-            el.textContent = `审核人: ${reviewerName} | 今日: ${data.today} 条 | 累计: ${data.total} 条`;
-        }
-    } catch (e) {
-        console.error('获取个人统计失败:', e);
     }
 }
 
@@ -1253,7 +1282,7 @@ async function saveAnnotation() {
         status.textContent = statusText;
         
         // 刷新个人统计
-        updateMyStats();
+        loadUserStats();
         
         // 标记为已提交
         savedAnnotationState = {
@@ -1261,6 +1290,9 @@ async function saveAnnotation() {
             additionalNotes: additionalNotes,
             submitted: true
         };
+        
+        // 更新用户统计
+        loadUserStats();
         
         // 3秒后清除消息
         setTimeout(() => {
