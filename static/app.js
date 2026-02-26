@@ -144,6 +144,17 @@ function updateReviewerDisplay() {
     const el = document.getElementById('reviewerDisplay');
     if (el && reviewerName) {
         el.textContent = '审核人: ' + reviewerName;
+        el.style.cursor = 'pointer';
+        el.title = '点击修改姓名';
+        el.onclick = () => {
+            const newName = prompt('请输入新的审核人姓名:', reviewerName);
+            if (newName && newName.trim()) {
+                reviewerName = newName.trim();
+                localStorage.setItem('reviewer_name', reviewerName);
+                updateReviewerDisplay();
+                loadUserStats();
+            }
+        };
     }
 }
 
