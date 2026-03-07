@@ -2157,37 +2157,36 @@ def api_get_annotation(episode_id: str):
     })
 
 
-def translate_with_gemini(text: str, api_key="sk-wcBPMUCtgVMe1RY5oNfvVi1do7vXqAQ44cEsQZhkVjv3kJ3g", timeout=30):
-    """使用 Gemini API 翻译文本（英文 -> 中文）"""
+def translate_with_gemini(text: str, api_key=None, timeout=30):
+    """使用 DashScope OpenAI 兼容接口 + Qwen 翻译文本（英文 -> 中文）"""
     if not text:
         return None
+    if api_key is None:
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("翻译需要配置 DASHSCOPE_API_KEY 环境变量或传入 api_key")
     
     conn = None
     try:
-        # 创建连接
-        conn = http.client.HTTPSConnection("api3.xhub.chat", timeout=timeout)
+        # DashScope OpenAI 兼容: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+        conn = http.client.HTTPSConnection("dashscope.aliyuncs.com", timeout=timeout)
         
-        # 构建请求 payload
         payload = json_module.dumps({
-            "contents": [{
+            "model": "qwen-turbo",
+            "messages": [{
                 "role": "user",
-                "parts": [{
-                    "text": f"Please translate the following English text to Chinese. Only return the Chinese translation without any explanations or additional text:\n\n{text}"
-                }]
+                "content": f"Please translate the following English text to Chinese. Only return the Chinese translation without any explanations or additional text:\n\n{text}"
             }],
-            "generationConfig": {
-                "temperature": 0.8,
-                "topP": 0.95,
-                "topK": 20,
-                # "maxOutputTokens": 512,
-                "responseMimeType": "text/plain"
-            }
+            "temperature": 0.3,
+            "max_tokens": 1024
         })
         
-        headers = {'Content-Type': 'application/json'}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
         
-        # 发送请求
-        conn.request("POST", f"/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}", payload, headers)
+        conn.request("POST", "/compatible-mode/v1/chat/completions", payload, headers)
         res = conn.getresponse()
         data = res.read()
         response_text = data.decode("utf-8")
@@ -2195,67 +2194,77 @@ def translate_with_gemini(text: str, api_key="sk-wcBPMUCtgVMe1RY5oNfvVi1do7vXqAQ
         conn.close()
         conn = None
         
-        # 解析响应
+        status = res.status
+        if status != 200:
+            err_msg = response_text[:500] if response_text else f"HTTP {status}"
+            try:
+                err_json = json_module.loads(response_text)
+                err_msg = err_json.get("error", {}).get("message", err_msg) if isinstance(err_json.get("error"), dict) else err_json.get("message", err_msg)
+            except Exception:
+                pass
+            print(f"翻译 API 错误 ({status}): {err_msg}")
+            raise RuntimeError(f"翻译服务返回 {status}: {err_msg}")
+        
         response_json = json_module.loads(response_text)
         
-        # 提取翻译结果（跳过思维链）
-        if "candidates" in response_json and len(response_json["candidates"]) > 0:
-            candidate = response_json["candidates"][0]
-            if "content" in candidate and "parts" in candidate["content"]:
-                for part in candidate["content"]["parts"]:
-                    # 跳过 CoT 思考过程（thought: true 的 part）
-                    if part.get("thought", False):
-                        continue
-                    
-                    if "text" in part:
-                        return part["text"].strip()
+        # API 返回错误信息（OpenAI 格式）
+        if "error" in response_json:
+            err = response_json["error"]
+            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            print(f"翻译 API 错误: {msg}")
+            raise RuntimeError(f"翻译服务: {msg}")
         
-        return None
+        # OpenAI 格式: choices[0].message.content
+        choices = response_json.get("choices") or []
+        if choices:
+            msg = choices[0].get("message") or {}
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if content:
+                return content.strip()
         
+        raise RuntimeError("翻译服务返回格式异常: 无有效 content")
+        
+    except RuntimeError:
+        raise
     except Exception as e:
         if conn:
             try:
                 conn.close()
-            except:
+            except Exception:
                 pass
         print(f"翻译失败: {e}")
-        return None
+        raise RuntimeError(f"翻译请求异常: {e}") from e
 
 
-def translate_batch_with_gemini(texts: list, api_key="sk-wcBPMUCtgVMe1RY5oNfvVi1do7vXqAQ44cEsQZhkVjv3kJ3g", timeout=60):
-    """批量翻译多条文本（英文 -> 中文）"""
+def translate_batch_with_gemini(texts: list, api_key=None, timeout=60):
+    """批量翻译多条文本（英文 -> 中文），使用 DashScope Qwen"""
     if not texts or len(texts) == 0:
         return None
+    if api_key is None:
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "sk-aecaf6f1f66a413eb92f64a658136ba0")
+    if not api_key:
+        raise RuntimeError("翻译需要配置 DASHSCOPE_API_KEY 环境变量或传入 api_key")
     
     conn = None
     try:
-        # 构建批量翻译的 prompt
         numbered_texts = "\n".join([f"{i+1}. {text}" for i, text in enumerate(texts)])
         prompt = f"Please translate the following English sentences to Chinese. Keep the same numbering format (1., 2., 3., etc.). Only return the Chinese translations with numbers, no explanations:\n\n{numbered_texts}"
         
-        # 创建连接
-        conn = http.client.HTTPSConnection("api3.xhub.chat", timeout=timeout)
+        conn = http.client.HTTPSConnection("dashscope.aliyuncs.com", timeout=timeout)
         
-        # 构建请求 payload
         payload = json_module.dumps({
-            "contents": [{
-                "role": "user",
-                "parts": [{
-                    "text": prompt
-                }]
-            }],
-            "generationConfig": {
-                "temperature": 0.8,
-                "topP": 0.95,
-                "topK": 20,
-                "responseMimeType": "text/plain"
-            }
+            "model": "qwen-turbo",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 2048
         })
         
-        headers = {'Content-Type': 'application/json'}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
         
-        # 发送请求
-        conn.request("POST", f"/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}", payload, headers)
+        conn.request("POST", "/compatible-mode/v1/chat/completions", payload, headers)
         res = conn.getresponse()
         data = res.read()
         response_text = data.decode("utf-8")
@@ -2263,51 +2272,54 @@ def translate_batch_with_gemini(texts: list, api_key="sk-wcBPMUCtgVMe1RY5oNfvVi1
         conn.close()
         conn = None
         
-        # 解析响应
+        status = res.status
+        if status != 200:
+            err_msg = response_text[:500] if response_text else f"HTTP {status}"
+            try:
+                err_json = json_module.loads(response_text)
+                err_msg = err_json.get("error", {}).get("message", err_msg) if isinstance(err_json.get("error"), dict) else err_json.get("message", err_msg)
+            except Exception:
+                pass
+            print(f"批量翻译 API 错误 ({status}): {err_msg}")
+            raise RuntimeError(f"翻译服务返回 {status}: {err_msg}")
+        
         response_json = json_module.loads(response_text)
         
-        # 提取翻译结果（跳过思维链）
-        if "candidates" in response_json and len(response_json["candidates"]) > 0:
-            candidate = response_json["candidates"][0]
-            if "content" in candidate and "parts" in candidate["content"]:
-                for part in candidate["content"]["parts"]:
-                    # 跳过 CoT 思考过程
-                    if part.get("thought", False):
-                        continue
-                    
-                    if "text" in part:
-                        full_text = part["text"].strip()
-                        
-                        # 解析编号的翻译结果
-                        lines = full_text.split('\n')
-                        translations = []
-                        
-                        for line in lines:
-                            line = line.strip()
-                            # 匹配 "1. xxx" 或 "1.xxx" 格式
-                            if line and (line[0].isdigit() or (len(line) > 1 and line[0:2].replace('.', '').isdigit())):
-                                # 去掉编号，只保留翻译内容
-                                parts = line.split('.', 1)
-                                if len(parts) == 2:
-                                    translations.append(parts[1].strip())
-                        
-                        if len(translations) == len(texts):
-                            return translations
-                        else:
-                            print(f"翻译数量不匹配: 期望 {len(texts)}, 得到 {len(translations)}")
-                            # 如果数量不匹配，返回原始文本
-                            return None
+        if "error" in response_json:
+            err = response_json["error"]
+            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            raise RuntimeError(f"翻译服务: {msg}")
         
-        return None
+        choices = response_json.get("choices") or []
+        if choices:
+            msg = choices[0].get("message") or {}
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if content:
+                full_text = content.strip()
+                lines = full_text.split("\n")
+                translations = []
+                for line in lines:
+                    line = line.strip()
+                    if line and (line[0].isdigit() or (len(line) > 1 and line[0:2].replace(".", "").isdigit())):
+                        parts = line.split(".", 1)
+                        if len(parts) == 2:
+                            translations.append(parts[1].strip())
+                if len(translations) == len(texts):
+                    return translations
+                raise RuntimeError(f"翻译数量不匹配: 期望 {len(texts)}, 得到 {len(translations)}")
         
+        raise RuntimeError("翻译服务返回格式异常: 无有效 content")
+        
+    except RuntimeError:
+        raise
     except Exception as e:
         if conn:
             try:
                 conn.close()
-            except:
+            except Exception:
                 pass
         print(f"批量翻译失败: {e}")
-        return None
+        raise RuntimeError(f"批量翻译请求异常: {e}") from e
 
 
 @app.route("/api/translate", methods=["POST"])
@@ -2551,17 +2563,26 @@ def api_user_stats():
     })
 
 
+# 审核人统计中排除的姓名（不参与统计展示）
+REVIEWER_STATS_EXCLUDE_NAMES = ("test", "陈短")
+
+
 @app.route("/api/admin/stats")
 def api_admin_stats():
     """管理后台统计数据"""
     conn = get_db_connection()
+    exclude_placeholders = ",".join("?" * len(REVIEWER_STATS_EXCLUDE_NAMES))
+    base_where = " reviewer_name IS NOT NULL AND reviewer_name != '' AND reviewer_name NOT IN (" + exclude_placeholders + ") "
+    base_args = tuple(REVIEWER_STATS_EXCLUDE_NAMES)
 
-    # 总标注数（只统计有审核人的）
-    total_annotations = conn.execute("SELECT COUNT(*) FROM annotations WHERE reviewer_name IS NOT NULL AND reviewer_name != ''").fetchone()[0]
+    # 总标注数（只统计有审核人的，排除 test、陈短）
+    total_annotations = conn.execute(
+        "SELECT COUNT(*) FROM annotations WHERE " + base_where, base_args
+    ).fetchone()[0]
 
-    # 总审核人数（去重，排除空值）
+    # 总审核人数（去重，排除空值和排除名单）
     total_reviewers = conn.execute(
-        "SELECT COUNT(DISTINCT reviewer_name) FROM annotations WHERE reviewer_name IS NOT NULL AND reviewer_name != ''"
+        "SELECT COUNT(DISTINCT reviewer_name) FROM annotations WHERE " + base_where, base_args
     ).fetchone()[0]
 
     # 今日标注数（UTC+8）
@@ -2569,11 +2590,11 @@ def api_admin_stats():
     utc8 = timezone(timedelta(hours=8))
     today = datetime.now(utc8).strftime("%Y-%m-%d")
     today_annotations = conn.execute(
-        "SELECT COUNT(*) FROM annotations WHERE substr(updated_at, 1, 10) = ? AND reviewer_name IS NOT NULL AND reviewer_name != ''",
-        (today,),
+        "SELECT COUNT(*) FROM annotations WHERE substr(updated_at, 1, 10) = ? AND " + base_where,
+        (today,) + base_args,
     ).fetchone()[0]
 
-    # 每个审核人的统计
+    # 每个审核人的统计（排除 test、陈短）
     reviewer_rows = conn.execute(
         """
         SELECT
@@ -2582,11 +2603,11 @@ def api_admin_stats():
             SUM(CASE WHEN substr(updated_at, 1, 10) = ? THEN 1 ELSE 0 END) as today_count,
             MAX(updated_at) as last_annotation_time
         FROM annotations
-        WHERE reviewer_name IS NOT NULL AND reviewer_name != ''
+        WHERE """ + base_where + """
         GROUP BY reviewer_name
         ORDER BY total_count DESC
         """,
-        (today,),
+        (today,) + base_args,
     ).fetchall()
 
     reviewers = []
@@ -2598,7 +2619,7 @@ def api_admin_stats():
             "last_annotation_time": row["last_annotation_time"],
         })
 
-    # 最近 7 天每日统计
+    # 最近 7 天每日统计（排除 test、陈短）
     daily_rows = conn.execute(
         """
         SELECT
@@ -2606,11 +2627,12 @@ def api_admin_stats():
             reviewer_name,
             COUNT(*) as cnt
         FROM annotations
-        WHERE reviewer_name IS NOT NULL AND reviewer_name != ''
+        WHERE """ + base_where + """
           AND updated_at >= date('now', '-7 days')
         GROUP BY date, reviewer_name
         ORDER BY date DESC
-        """
+        """,
+        base_args,
     ).fetchall()
 
     daily_map = {}
