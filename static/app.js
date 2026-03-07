@@ -1003,9 +1003,12 @@ function renderVideos(episodeId) {
         }
     });
 
-    // 播放结束
+    // 播放结束：暂停并重置到开头，准备下次播放
     originalVideo.addEventListener('ended', () => {
+        originalVideo.pause();
         renderedVideo.pause();
+        originalVideo.currentTime = 0;
+        renderedVideo.currentTime = 0;
     });
 
     // 组装
