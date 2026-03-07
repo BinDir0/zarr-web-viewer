@@ -736,6 +736,14 @@ async function loadEpisodeDetail(episodeId) {
 // 渲染视频 scrubbing 视图
 function renderVideos(episodeId) {
     const framesGrid = document.getElementById('framesGrid');
+
+    // 在清空之前，先暂停所有video元素
+    const existingVideos = framesGrid.querySelectorAll('video');
+    existingVideos.forEach(v => {
+        v.pause();
+        v.currentTime = 0;
+    });
+
     framesGrid.innerHTML = '';
 
     // 清理上一次的 document-level 事件监听器
@@ -751,15 +759,29 @@ function renderVideos(episodeId) {
     // 尝试复用预加载的 video 元素
     const cached = preloadedVideos.get(episodeId);
 
-    const originalVideo = cached ? cached.originalVideo.cloneNode(true) : document.createElement('video');
-    const renderedVideo = cached ? cached.renderedVideo.cloneNode(true) : document.createElement('video');
+    let originalVideo, renderedVideo;
 
-    if (!cached) {
+    if (cached) {
+        // 直接复用预加载的video元素，不要克隆
+        originalVideo = cached.originalVideo;
+        renderedVideo = cached.renderedVideo;
+
+        // 重置播放状态
+        originalVideo.currentTime = 0;
+        renderedVideo.currentTime = 0;
+        originalVideo.pause();
+        renderedVideo.pause();
+    } else {
+        // 没有缓存时创建新元素
+        originalVideo = document.createElement('video');
+        renderedVideo = document.createElement('video');
+
         originalVideo.src = `/api/episode/${episodeId}/video/original`;
         renderedVideo.src = `/api/episode/${episodeId}/video/rendered`;
-    } else {
-        originalVideo.src = cached.original;
-        renderedVideo.src = cached.rendered;
+
+        // 只对新创建的video调用load()
+        originalVideo.load();
+        renderedVideo.load();
     }
 
     // 通用属性
@@ -770,7 +792,6 @@ function renderVideos(episodeId) {
         v.playbackRate = 1.0;
         v.defaultPlaybackRate = 1.0;
         v.style.pointerEvents = 'none'; // 防止视频拦截进度条拖拽事件
-        v.load();
     });
 
     originalVideo.className = 'scrub-video scrub-video-original';
