@@ -130,16 +130,24 @@ def load_episode_frames(crop_dir: str, frame_indices: List[int], max_width: int 
     crop_path = Path(crop_dir)
     extracted_dir = crop_path / "extracted_images"
 
-    # 加载 model_boxes.npy（如果存在）
-    model_boxes = None
+    # 加载 model_tracks.npy（包含左右手分类信息）
+    frame_boxes: Dict[int, list] = {}  # {frame_idx: [(x1,y1,x2,y2,conf,handedness), ...]}
     tracks_dirs = sorted(crop_path.glob("tracks_*"))
     if tracks_dirs:
-        boxes_path = tracks_dirs[0] / "model_boxes.npy"
-        if boxes_path.exists():
+        tracks_path = tracks_dirs[0] / "model_tracks.npy"
+        if tracks_path.exists():
             try:
-                model_boxes = np.load(str(boxes_path), allow_pickle=True)
+                tracks_data = np.load(str(tracks_path), allow_pickle=True).item()
+                for track_id, detections in tracks_data.items():
+                    for det in detections:
+                        f = det["frame"]
+                        box = det["det_box"][0]  # shape (5,): [x1,y1,x2,y2,conf]
+                        h = det["det_handedness"][0]  # 0=left, >0=right
+                        frame_boxes.setdefault(f, []).append(
+                            (float(box[0]), float(box[1]), float(box[2]), float(box[3]), float(box[4]), int(h))
+                        )
             except Exception as e:
-                print(f"⚠ 加载 model_boxes 失败 ({crop_path.name}): {e}")
+                print(f"⚠ 加载 model_tracks 失败 ({crop_path.name}): {e}")
 
     results = []
     for frame_idx in frame_indices:
@@ -150,19 +158,16 @@ def load_episode_frames(crop_dir: str, frame_indices: List[int], max_width: int 
         try:
             img = Image.open(img_path).convert("RGB")
 
-            # 绘制 YOLO 检测框
-            if model_boxes is not None and frame_idx < len(model_boxes):
-                boxes = model_boxes[frame_idx]
-                if boxes is not None and len(boxes) > 0:
-                    draw = ImageDraw.Draw(img)
-                    for box in boxes:
-                        x1, y1, x2, y2 = box[:4]
-                        conf = box[4] if len(box) > 4 else 0.0
-                        # 绿色框，线宽 3
-                        draw.rectangle([x1, y1, x2, y2], outline="#00FF00", width=3)
-                        # 置信度标签
-                        label = f"{conf:.2f}"
-                        draw.text((x1 + 2, y1 - 16), label, fill="#00FF00")
+            # 绘制左右手检测框（蓝=左手，红=右手）
+            if frame_idx in frame_boxes:
+                draw = ImageDraw.Draw(img)
+                for x1, y1, x2, y2, conf, handedness in frame_boxes[frame_idx]:
+                    if handedness == 0:
+                        color, label = "#00BFFF", f"L {conf:.2f}"
+                    else:
+                        color, label = "#FF4444", f"R {conf:.2f}"
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=5)
+                    draw.text((x1 + 2, y1 - 16), label, fill=color)
 
             # 缩放
             w, h = img.size
