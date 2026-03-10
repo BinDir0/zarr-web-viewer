@@ -3,7 +3,7 @@
 buildai_dataset_root: /share_data/lvjianan/datasets/BuildAI-processed/
 
 # 预生成的视频路径列表（每行一个 .mp4 路径），避免扫描文件系统
-episode_list_file: /share_data/lvjianan/datasets/BuildAI-processed/video_list.txt
+episode_list_file: /share_data/guantianrui/facHaWoRy/videos_new.txt
 
-server_port: 9470
+server_port: 9472
 debug_mode: true
