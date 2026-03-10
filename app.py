@@ -138,13 +138,16 @@ def load_episode_frames(crop_dir: str, frame_indices: List[int], max_width: int 
         if tracks_path.exists():
             try:
                 tracks_data = np.load(str(tracks_path), allow_pickle=True).item()
+                # 按 track 做 majority voting 确定左右手
                 for track_id, detections in tracks_data.items():
+                    # 投票：统计该 track 所有帧的 handedness，取多数
+                    all_h = [det["det_handedness"][0] for det in detections]
+                    voted_h = 1 if sum(1 for h in all_h if h > 0) > len(all_h) / 2 else 0
                     for det in detections:
                         f = det["frame"]
-                        box = det["det_box"][0]  # shape (5,): [x1,y1,x2,y2,conf]
-                        h = det["det_handedness"][0]  # 0=left, >0=right
+                        box = det["det_box"][0]
                         frame_boxes.setdefault(f, []).append(
-                            (float(box[0]), float(box[1]), float(box[2]), float(box[3]), float(box[4]), int(h))
+                            (float(box[0]), float(box[1]), float(box[2]), float(box[3]), float(box[4]), voted_h)
                         )
             except Exception as e:
                 print(f"⚠ 加载 model_tracks 失败 ({crop_path.name}): {e}")
