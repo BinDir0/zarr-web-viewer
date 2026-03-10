@@ -22,6 +22,7 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     SERVER_PORT = int(config.get("server_port", 9470))
     DEBUG_MODE = bool(config.get("debug_mode", True))
     BUILDAI_ROOT = Path(config["buildai_dataset_root"])
+    EPISODE_LIST_FILE = config.get("episode_list_file", None)
 
 DB_PATH = Path(__file__).parent / "annotations.db"
 
@@ -45,29 +46,59 @@ _ALL_EPISODES: Optional[List[Dict]] = None
 
 
 def scan_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
-    """扫描 BuildAI-processed 目录，返回排序后的 episode 列表。
+    """从预生成的 txt 文件加载 episode 列表（快速），或回退到文件系统扫描。
 
+    txt 文件每行一个 .mp4 路径，对应的 crop 目录 = 去掉 .mp4 后缀。
     每个 crop 目录 = 1 个 episode。结果缓存在模块级变量中。
     """
     global _ALL_EPISODES
     if _ALL_EPISODES is not None and not force_rescan:
         return _ALL_EPISODES
 
-    print(f"🔍 扫描 BuildAI 数据集: {BUILDAI_ROOT}")
     episodes: List[Dict] = []
 
-    # 遍历 factory_*/worker_*/processed/*/extracted_images
+    # 优先从 txt 文件读取
+    if EPISODE_LIST_FILE and os.path.exists(EPISODE_LIST_FILE):
+        print(f"📋 从列表文件加载: {EPISODE_LIST_FILE}")
+        with open(EPISODE_LIST_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # 路径格式: .../factory001_worker001_00000_crop001.mp4
+                # crop 目录 = 去掉 .mp4 后缀
+                if line.endswith(".mp4"):
+                    crop_dir = line[:-4]  # 去掉 .mp4
+                else:
+                    crop_dir = line
+                crop_path = Path(crop_dir)
+                crop_name = crop_path.name
+
+                # num_frames 延迟到实际加载时再计数（避免启动慢）
+                episodes.append({
+                    "episode_id": crop_name,
+                    "episode_name": crop_name,
+                    "dataset_name": "BuildAI",
+                    "crop_dir": str(crop_path),
+                    "num_frames": -1,  # 延迟计数
+                    "tracks_dir": None,  # 延迟查找
+                })
+
+        _ALL_EPISODES = episodes
+        print(f"✓ 从列表文件加载完成: 共 {len(episodes)} 个 episodes")
+        return episodes
+
+    # 回退：扫描文件系统
+    print(f"🔍 扫描 BuildAI 数据集: {BUILDAI_ROOT}")
     for extracted_dir in sorted(BUILDAI_ROOT.glob("*/*/processed/*/extracted_images")):
         crop_dir = extracted_dir.parent
-        crop_name = crop_dir.name  # e.g. factory001_worker001_00000_crop001
+        crop_name = crop_dir.name
 
-        # 快速计数 JPG 文件
         jpg_files = sorted(extracted_dir.glob("*.jpg"))
         num_frames = len(jpg_files)
         if num_frames == 0:
             continue
 
-        # 查找 tracks 目录（可能叫 tracks_0_180 之类）
         tracks_dirs = sorted(crop_dir.glob("tracks_*"))
         tracks_dir = tracks_dirs[0] if tracks_dirs else None
 
@@ -320,6 +351,15 @@ def api_episodes_sequential():
         """加载单个 episode 的帧并编码"""
         try:
             num_frames = ep["num_frames"]
+            # 延迟计数：如果启动时没有计数，现在计数
+            if num_frames <= 0:
+                extracted_dir = Path(ep["crop_dir"]) / "extracted_images"
+                if not extracted_dir.exists():
+                    return None
+                num_frames = len(list(extracted_dir.glob("*.jpg")))
+                ep["num_frames"] = num_frames
+                if num_frames == 0:
+                    return None
             # 选择 2 个中间帧：1/3 和 2/3 位置
             if num_frames <= 2:
                 frame_indices = list(range(num_frames))
