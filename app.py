@@ -152,16 +152,17 @@ def load_episode_frames(crop_dir: str, frame_indices: List[int], max_width: int 
             except Exception as e:
                 print(f"⚠ 加载 model_tracks 失败 ({crop_path.name}): {e}")
 
-    # 列出实际存在的图片文件（排序后按索引访问）
-    all_jpg_files = sorted(extracted_dir.glob("*.jpg"))
-    if not all_jpg_files:
-        return []
-
     results = []
     for frame_idx in frame_indices:
-        if frame_idx < 0 or frame_idx >= len(all_jpg_files):
+        # 尝试常见命名格式：6位、4位、不补零
+        img_path = None
+        for fmt in (f"{frame_idx:06d}.jpg", f"{frame_idx:04d}.jpg", f"{frame_idx}.jpg"):
+            p = extracted_dir / fmt
+            if p.exists():
+                img_path = p
+                break
+        if img_path is None:
             continue
-        img_path = all_jpg_files[frame_idx]
 
         try:
             img = Image.open(img_path).convert("RGB")
