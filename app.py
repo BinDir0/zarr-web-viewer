@@ -119,38 +119,72 @@ def scan_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
 # ─── 图像加载与 YOLO Box 渲染 ─────────────────────────────────────────
 
 
-def load_episode_frames(crop_dir: str, frame_indices: List[int], max_width: int = 640) -> List[str]:
-    """加载指定帧并绘制 YOLO 手部检测框，返回 base64 编码图像列表。
+def load_track_boxes(crop_dir: str) -> Dict[int, list]:
+    """加载 model_tracks.npy，返回 per-frame box 查找表。
 
-    Args:
-        crop_dir: crop 目录路径
-        frame_indices: 要加载的帧索引列表
-        max_width: 缩放后的最大宽度
+    Returns:
+        {frame_idx: [(x1, y1, x2, y2, conf, voted_handedness), ...]}
     """
     crop_path = Path(crop_dir)
-    extracted_dir = crop_path / "extracted_images"
-
-    # 加载 model_tracks.npy（包含左右手分类信息）
-    frame_boxes: Dict[int, list] = {}  # {frame_idx: [(x1,y1,x2,y2,conf,handedness), ...]}
+    frame_boxes: Dict[int, list] = {}
     tracks_dirs = sorted(crop_path.glob("tracks_*"))
-    if tracks_dirs:
-        tracks_path = tracks_dirs[0] / "model_tracks.npy"
-        if tracks_path.exists():
-            try:
-                tracks_data = np.load(str(tracks_path), allow_pickle=True).item()
-                # 按 track 做 majority voting 确定左右手
-                for track_id, detections in tracks_data.items():
-                    # 投票：统计该 track 所有帧的 handedness，取多数
-                    all_h = [det["det_handedness"][0] for det in detections]
-                    voted_h = 1 if sum(1 for h in all_h if h > 0) > len(all_h) / 2 else 0
-                    for det in detections:
-                        f = det["frame"]
-                        box = det["det_box"][0]
-                        frame_boxes.setdefault(f, []).append(
-                            (float(box[0]), float(box[1]), float(box[2]), float(box[3]), float(box[4]), voted_h)
-                        )
-            except Exception as e:
-                print(f"⚠ 加载 model_tracks 失败 ({crop_path.name}): {e}")
+    if not tracks_dirs:
+        return frame_boxes
+    tracks_path = tracks_dirs[0] / "model_tracks.npy"
+    if not tracks_path.exists():
+        return frame_boxes
+    try:
+        tracks_data = np.load(str(tracks_path), allow_pickle=True).item()
+        for track_id, detections in tracks_data.items():
+            all_h = [det["det_handedness"][0] for det in detections]
+            voted_h = 1 if sum(1 for h in all_h if h > 0) > len(all_h) / 2 else 0
+            for det in detections:
+                f = det["frame"]
+                box = det["det_box"][0]
+                frame_boxes.setdefault(f, []).append(
+                    (float(box[0]), float(box[1]), float(box[2]), float(box[3]), float(box[4]), voted_h)
+                )
+    except Exception as e:
+        print(f"⚠ 加载 model_tracks 失败 ({crop_path.name}): {e}")
+    return frame_boxes
+
+
+def pick_frames_with_boxes(num_frames: int, frame_boxes: Dict[int, list], num_picks: int = 2) -> List[int]:
+    """在目标位置（1/3、2/3）附近选取有检测框的帧。
+
+    对每个目标位置，向两侧搜索最近的有 box 的帧。
+    如果整个 episode 都没有 box，回退到原始目标位置。
+    """
+    if num_frames <= num_picks:
+        return list(range(num_frames))
+
+    targets = [num_frames // 3, 2 * num_frames // 3]
+    frames_with_boxes = set(frame_boxes.keys())
+
+    if not frames_with_boxes:
+        return targets  # 没有任何 box，回退
+
+    picked = []
+    for target in targets:
+        # 向两侧扩展搜索最近的有 box 的帧
+        best = None
+        for delta in range(num_frames):
+            for candidate in (target + delta, target - delta):
+                if 0 <= candidate < num_frames and candidate in frames_with_boxes:
+                    best = candidate
+                    break
+            if best is not None:
+                break
+        picked.append(best if best is not None else target)
+
+    return picked
+
+
+def load_episode_frames(crop_dir: str, frame_indices: List[int],
+                        frame_boxes: Dict[int, list], max_width: int = 640) -> List[str]:
+    """加载指定帧并绘制 YOLO 手部检测框，返回 base64 编码图像列表。"""
+    crop_path = Path(crop_dir)
+    extracted_dir = crop_path / "extracted_images"
 
     results = []
     for frame_idx in frame_indices:
@@ -175,7 +209,7 @@ def load_episode_frames(crop_dir: str, frame_indices: List[int], max_width: int 
                         color, label = "#00BFFF", f"L {conf:.2f}"
                     else:
                         color, label = "#FF4444", f"R {conf:.2f}"
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=5)
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=12)
                     draw.text((x1 + 2, y1 - 16), label, fill=color)
 
             # 缩放
@@ -380,13 +414,11 @@ def api_episodes_sequential():
                 if num_frames == 0:
                     fail_reasons.append(f"0 jpg files in: {extracted_dir}")
                     return None
-            # 选择 2 个中间帧：1/3 和 2/3 位置
-            if num_frames <= 2:
-                frame_indices = list(range(num_frames))
-            else:
-                frame_indices = [num_frames // 3, 2 * num_frames // 3]
+            # 加载 track 数据，选取有检测框的帧
+            frame_boxes = load_track_boxes(ep["crop_dir"])
+            frame_indices = pick_frames_with_boxes(num_frames, frame_boxes)
 
-            images = load_episode_frames(ep["crop_dir"], frame_indices)
+            images = load_episode_frames(ep["crop_dir"], frame_indices, frame_boxes)
             if not images:
                 fail_reasons.append(f"load_episode_frames returned empty for frames {frame_indices}: {ep['crop_dir']}")
                 return None
