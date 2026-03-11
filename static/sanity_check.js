@@ -241,7 +241,14 @@ async function loadEpisodes(clearMarks = true) {
         }
         
         episodes = data.episodes;
-        
+
+        // 诊断：如果 0 个 episodes 且有失败原因，显示给用户
+        if (episodes.length === 0 && data.debug_fail_reasons) {
+            const reasons = data.debug_fail_reasons.join('\n');
+            console.error('所有 episodes 加载失败，原因:\n' + reasons);
+            alert('本批次 0 个 episodes 加载成功。\n\n失败原因（前5条）:\n' + reasons);
+        }
+
         // 保存下一个偏移量
         if (data.next_offset !== undefined) {
             currentOffset = data.next_offset;

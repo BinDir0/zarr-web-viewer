@@ -355,6 +355,8 @@ def api_episodes_sequential():
             annotation_status[ep_id] = {"has_annotation": True, "mark_type": "alright", "bad_frames": []}
 
     # 为每个 episode 计算 2 个中间帧
+    fail_reasons = []  # 收集失败原因用于诊断
+
     def process_episode(ep: Dict) -> Optional[Dict]:
         """加载单个 episode 的帧并编码"""
         try:
@@ -363,10 +365,14 @@ def api_episodes_sequential():
             if num_frames <= 0:
                 extracted_dir = Path(ep["crop_dir"]) / "extracted_images"
                 if not extracted_dir.exists():
+                    crop_exists = Path(ep["crop_dir"]).exists()
+                    reason = f"no extracted_images/ (crop_dir exists={crop_exists}): {ep['crop_dir']}"
+                    fail_reasons.append(reason)
                     return None
                 num_frames = len(list(extracted_dir.glob("*.jpg")))
                 ep["num_frames"] = num_frames
                 if num_frames == 0:
+                    fail_reasons.append(f"0 jpg files in: {extracted_dir}")
                     return None
             # 选择 2 个中间帧：1/3 和 2/3 位置
             if num_frames <= 2:
@@ -376,6 +382,7 @@ def api_episodes_sequential():
 
             images = load_episode_frames(ep["crop_dir"], frame_indices)
             if not images:
+                fail_reasons.append(f"load_episode_frames returned empty for frames {frame_indices}: {ep['crop_dir']}")
                 return None
 
             result = {
@@ -395,7 +402,7 @@ def api_episodes_sequential():
 
             return result
         except Exception as e:
-            print(f"⚠ 处理 episode {ep['episode_id']} 失败: {e}")
+            fail_reasons.append(f"exception: {e} for {ep['episode_id']}")
             return None
 
     # 并行加载所有 episodes 的帧
@@ -413,16 +420,23 @@ def api_episodes_sequential():
     timers["total"] = total_time
     timers["other"] = total_time - sum(v for k, v in timers.items() if k != "total" and k != "other")
 
+    # 诊断：如果有大量失败，打印前几条原因
+    fail_count = len(batch) - len(results)
     print(f"\n{'=' * 60}")
     print(f"[{user_id[:8]}] 性能报告 (offset={global_offset}, limit={limit})")
     print(f"{'=' * 60}")
     print(f"  扫描episodes:   {timers.get('scan_episodes', 0):.3f}s")
     print(f"  数据库查询:     {timers.get('db_query', 0):.3f}s")
     print(f"  加载+编码图像:  {timers.get('load_and_encode', 0):.3f}s")
+    print(f"  成功/失败:      {len(results)}/{fail_count}")
     print(f"  总耗时:         {total_time:.3f}s")
+    if fail_reasons:
+        print(f"  --- 失败原因（前5条）---")
+        for reason in fail_reasons[:5]:
+            print(f"    ✗ {reason}")
     print(f"{'=' * 60}\n")
 
-    return jsonify({
+    resp = {
         "success": True,
         "episodes": results,
         "has_more": next_offset != 0,
@@ -430,7 +444,13 @@ def api_episodes_sequential():
         "total_episodes": total_episodes,
         "collected_count": len(results),
         "performance": timers,
-    })
+    }
+
+    # 当全部失败时，返回诊断信息给前端
+    if not results and fail_reasons:
+        resp["debug_fail_reasons"] = fail_reasons[:5]
+
+    return jsonify(resp)
 
 
 @app.route("/api/stats", methods=["GET"])
