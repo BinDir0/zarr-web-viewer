@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import os
 import sqlite3
 import time
@@ -21,8 +22,9 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     config = yaml.safe_load(f)
     SERVER_PORT = int(config.get("server_port", 9470))
     DEBUG_MODE = bool(config.get("debug_mode", True))
-    BUILDAI_ROOT = Path(config["buildai_dataset_root"])
-    EPISODE_LIST_FILE = config.get("episode_list_file", None)
+    FACTORY_BASE = config["factory_base"]
+    FACTORY_START = int(config["factory_start"])
+    FACTORY_END = int(config["factory_end"])
 
 DB_PATH = Path(__file__).parent / "annotations.db"
 
@@ -45,11 +47,11 @@ except ImportError:
 _ALL_EPISODES: Optional[List[Dict]] = None
 
 
-def scan_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
-    """从预生成的 txt 文件加载 episode 列表（快速），或回退到文件系统扫描。
+def scan_factory_episodes(force_rescan: bool = False) -> List[Dict]:
+    """扫描 factory range 中的所有视频，返回 episode 列表。
 
-    txt 文件每行一个 .mp4 路径，对应的 crop 目录 = 去掉 .mp4 后缀。
-    每个 crop 目录 = 1 个 episode。结果缓存在模块级变量中。
+    从每个 factory 的 _video_index.json 加载（带帧 offset），
+    如果 index 不存在则跳过该 factory。
     """
     global _ALL_EPISODES
     if _ALL_EPISODES is not None and not force_rescan:
@@ -57,77 +59,69 @@ def scan_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
 
     episodes: List[Dict] = []
 
-    # 优先从 txt 文件读取
-    if EPISODE_LIST_FILE and os.path.exists(EPISODE_LIST_FILE):
-        print(f"📋 从列表文件加载: {EPISODE_LIST_FILE}")
-        with open(EPISODE_LIST_FILE, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                # 路径格式: .../factory001_worker001_00000_crop001.mp4
-                # crop 目录 = 去掉 .mp4 后缀
-                if line.endswith(".mp4"):
-                    crop_dir = line[:-4]  # 去掉 .mp4
-                else:
-                    crop_dir = line
-                crop_path = Path(crop_dir)
-                crop_name = crop_path.name
+    for fid in range(FACTORY_START, FACTORY_END + 1):
+        factory_dir = os.path.join(FACTORY_BASE, f"factory{fid:03d}")
+        index_path = os.path.join(factory_dir, "_video_index.json")
 
-                # num_frames 延迟到实际加载时再计数（避免启动慢）
-                episodes.append({
-                    "episode_id": crop_name,
-                    "episode_name": crop_name,
-                    "dataset_name": "BuildAI",
-                    "crop_dir": str(crop_path),
-                    "num_frames": -1,  # 延迟计数
-                    "tracks_dir": None,  # 延迟查找
-                })
-
-        _ALL_EPISODES = episodes
-        print(f"✓ 从列表文件加载完成: 共 {len(episodes)} 个 episodes")
-        return episodes
-
-    # 回退：扫描文件系统
-    print(f"🔍 扫描 BuildAI 数据集: {BUILDAI_ROOT}")
-    for extracted_dir in sorted(BUILDAI_ROOT.glob("*/*/processed/*/extracted_images")):
-        crop_dir = extracted_dir.parent
-        crop_name = crop_dir.name
-
-        jpg_files = sorted(extracted_dir.glob("*.jpg"))
-        num_frames = len(jpg_files)
-        if num_frames == 0:
+        if not os.path.exists(index_path):
             continue
 
-        tracks_dirs = sorted(crop_dir.glob("tracks_*"))
-        tracks_dir = tracks_dirs[0] if tracks_dirs else None
+        try:
+            with open(index_path, "r") as f:
+                index = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
 
-        episodes.append({
-            "episode_id": crop_name,
-            "episode_name": crop_name,
-            "dataset_name": "BuildAI",
-            "crop_dir": str(crop_dir),
-            "num_frames": num_frames,
-            "tracks_dir": str(tracks_dir) if tracks_dir else None,
-        })
+        videos = index.get("videos", {})
+        for video_key, info in sorted(videos.items()):
+            frames = info.get("frames", [])
+            if not frames:
+                continue
+
+            shard_path = os.path.join(factory_dir, info["shard"])
+            seq_folder = os.path.join(factory_dir, "outputs", video_key)
+
+            # 新格式: frames 是 list of dict {name, offset, size}
+            # 旧格式: frames 是 list of str
+            if frames and isinstance(frames[0], dict):
+                frame_names = [f["name"] for f in frames]
+                frame_offsets = [[f["offset"], f["size"]] for f in frames]
+            else:
+                frame_names = frames
+                frame_offsets = None
+
+            episodes.append({
+                "episode_id": video_key,
+                "episode_name": info.get("video_name", video_key),
+                "dataset_name": f"factory{fid:03d}",
+                "shard_path": shard_path,
+                "frame_names": frame_names,
+                "frame_offsets": frame_offsets,
+                "seq_folder": seq_folder,
+                "num_frames": len(frame_names),
+            })
 
     _ALL_EPISODES = episodes
-    print(f"✓ 扫描完成: 共 {len(episodes)} 个 episodes")
+    print(f"✓ 扫描完成: factory{FACTORY_START:03d}~factory{FACTORY_END:03d}, 共 {len(episodes)} 个 videos")
     return episodes
 
 
 # ─── 图像加载与 YOLO Box 渲染 ─────────────────────────────────────────
 
 
-def load_track_boxes(crop_dir: str) -> Dict[int, list]:
+def load_track_boxes(seq_folder: str) -> Dict[int, list]:
     """加载 model_tracks.npy，返回 per-frame box 查找表。
 
     Returns:
         {frame_idx: [(x1, y1, x2, y2, conf, voted_handedness), ...]}
     """
-    crop_path = Path(crop_dir)
+    seq_path = Path(seq_folder)
     frame_boxes: Dict[int, list] = {}
-    tracks_dirs = sorted(crop_path.glob("tracks_*"))
+
+    if not seq_path.exists():
+        return frame_boxes
+
+    tracks_dirs = sorted(seq_path.glob("tracks_*"))
     if not tracks_dirs:
         return frame_boxes
     tracks_path = tracks_dirs[0] / "model_tracks.npy"
@@ -145,16 +139,12 @@ def load_track_boxes(crop_dir: str) -> Dict[int, list]:
                     (float(box[0]), float(box[1]), float(box[2]), float(box[3]), float(box[4]), voted_h)
                 )
     except Exception as e:
-        print(f"⚠ 加载 model_tracks 失败 ({crop_path.name}): {e}")
+        print(f"⚠ 加载 model_tracks 失败 ({seq_path.name}): {e}")
     return frame_boxes
 
 
 def pick_frames_with_boxes(num_frames: int, frame_boxes: Dict[int, list], num_picks: int = 2) -> List[int]:
-    """在目标位置（1/3、2/3）附近选取有检测框的帧。
-
-    对每个目标位置，向两侧搜索最近的有 box 的帧。
-    如果整个 episode 都没有 box，回退到原始目标位置。
-    """
+    """在目标位置（1/3、2/3）附近选取有检测框的帧。"""
     if num_frames <= num_picks:
         return list(range(num_frames))
 
@@ -162,11 +152,10 @@ def pick_frames_with_boxes(num_frames: int, frame_boxes: Dict[int, list], num_pi
     frames_with_boxes = set(frame_boxes.keys())
 
     if not frames_with_boxes:
-        return targets  # 没有任何 box，回退
+        return targets
 
     picked = []
     for target in targets:
-        # 向两侧扩展搜索最近的有 box 的帧
         best = None
         for delta in range(num_frames):
             for candidate in (target + delta, target - delta):
@@ -180,26 +169,36 @@ def pick_frames_with_boxes(num_frames: int, frame_boxes: Dict[int, list], num_pi
     return picked
 
 
-def load_episode_frames(crop_dir: str, frame_indices: List[int],
-                        frame_boxes: Dict[int, list], max_width: int = 640) -> List[str]:
-    """加载指定帧并绘制 YOLO 手部检测框，返回 base64 编码图像列表。"""
-    crop_path = Path(crop_dir)
-    extracted_dir = crop_path / "extracted_images"
-
+def load_episode_frames_from_shard(
+    shard_path: str,
+    frame_names: List[str],
+    frame_offsets: Optional[List[List]],
+    frame_indices: List[int],
+    frame_boxes: Dict[int, list],
+    max_width: int = 640,
+) -> List[str]:
+    """从 tar shard 加载指定帧并绘制 YOLO 检测框，返回 base64 编码图像列表。"""
     results = []
+
     for frame_idx in frame_indices:
-        # 尝试常见命名格式：6位、4位、不补零
-        img_path = None
-        for fmt in (f"{frame_idx:06d}.jpg", f"{frame_idx:04d}.jpg", f"{frame_idx}.jpg"):
-            p = extracted_dir / fmt
-            if p.exists():
-                img_path = p
-                break
-        if img_path is None:
+        if frame_idx < 0 or frame_idx >= len(frame_names):
             continue
 
         try:
-            img = Image.open(img_path).convert("RGB")
+            # 读取 JPEG 数据
+            if frame_offsets is not None:
+                offset, size = frame_offsets[frame_idx]
+                with open(shard_path, "rb") as f:
+                    f.seek(offset)
+                    jpeg_data = f.read(size)
+            else:
+                # 无 offset 回退：用 tarfile（慢）
+                import tarfile
+                with tarfile.open(shard_path, "r") as tar:
+                    member = tar.getmember(frame_names[frame_idx])
+                    jpeg_data = tar.extractfile(member).read()
+
+            img = Image.open(io.BytesIO(jpeg_data)).convert("RGB")
 
             # 绘制左右手检测框（蓝=左手，红=右手）
             if frame_idx in frame_boxes:
@@ -231,7 +230,7 @@ def load_episode_frames(crop_dir: str, frame_indices: List[int],
                 results.append(f"data:image/jpeg;base64,{b64}")
 
         except Exception as e:
-            print(f"⚠ 加载帧失败 ({img_path}): {e}")
+            print(f"⚠ 加载帧失败 (shard={os.path.basename(shard_path)}, frame={frame_idx}): {e}")
 
     return results
 
@@ -336,11 +335,11 @@ def sanity_check():
 @app.route("/api/total-episodes", methods=["GET"])
 def api_total_episodes():
     """获取总 episode 数"""
-    episodes = scan_buildai_episodes()
+    episodes = scan_factory_episodes()
     return jsonify({
         "success": True,
         "total_episodes": len(episodes),
-        "datasets": [{"name": "BuildAI", "count": len(episodes)}],
+        "datasets": [{"name": f"factory{FACTORY_START:03d}-{FACTORY_END:03d}", "count": len(episodes)}],
     })
 
 
@@ -356,7 +355,7 @@ def api_episodes_sequential():
 
     # 扫描 episodes
     t0 = time.time()
-    all_episodes = scan_buildai_episodes()
+    all_episodes = scan_factory_episodes()
     timers["scan_episodes"] = time.time() - t0
 
     total_episodes = len(all_episodes)
@@ -394,33 +393,29 @@ def api_episodes_sequential():
         else:
             annotation_status[ep_id] = {"has_annotation": True, "mark_type": "alright", "bad_frames": []}
 
-    # 为每个 episode 计算 2 个中间帧
-    fail_reasons = []  # 收集失败原因用于诊断
+    fail_reasons = []
 
     def process_episode(ep: Dict) -> Optional[Dict]:
         """加载单个 episode 的帧并编码"""
         try:
             num_frames = ep["num_frames"]
-            # 延迟计数：如果启动时没有计数，现在计数
-            if num_frames <= 0:
-                extracted_dir = Path(ep["crop_dir"]) / "extracted_images"
-                if not extracted_dir.exists():
-                    crop_exists = Path(ep["crop_dir"]).exists()
-                    reason = f"no extracted_images/ (crop_dir exists={crop_exists}): {ep['crop_dir']}"
-                    fail_reasons.append(reason)
-                    return None
-                num_frames = len(list(extracted_dir.glob("*.jpg")))
-                ep["num_frames"] = num_frames
-                if num_frames == 0:
-                    fail_reasons.append(f"0 jpg files in: {extracted_dir}")
-                    return None
+            if num_frames == 0:
+                fail_reasons.append(f"0 frames: {ep['episode_id']}")
+                return None
+
             # 加载 track 数据，选取有检测框的帧
-            frame_boxes = load_track_boxes(ep["crop_dir"])
+            frame_boxes = load_track_boxes(ep["seq_folder"])
             frame_indices = pick_frames_with_boxes(num_frames, frame_boxes)
 
-            images = load_episode_frames(ep["crop_dir"], frame_indices, frame_boxes)
+            images = load_episode_frames_from_shard(
+                ep["shard_path"],
+                ep["frame_names"],
+                ep["frame_offsets"],
+                frame_indices,
+                frame_boxes,
+            )
             if not images:
-                fail_reasons.append(f"load_episode_frames returned empty for frames {frame_indices}: {ep['crop_dir']}")
+                fail_reasons.append(f"load_episode_frames returned empty for {ep['episode_id']}")
                 return None
 
             result = {
@@ -458,7 +453,6 @@ def api_episodes_sequential():
     timers["total"] = total_time
     timers["other"] = total_time - sum(v for k, v in timers.items() if k != "total" and k != "other")
 
-    # 诊断：如果有大量失败，打印前几条原因
     fail_count = len(batch) - len(results)
     print(f"\n{'=' * 60}")
     print(f"[{user_id[:8]}] 性能报告 (offset={global_offset}, limit={limit})")
@@ -484,7 +478,6 @@ def api_episodes_sequential():
         "performance": timers,
     }
 
-    # 当全部失败时，返回诊断信息给前端
     if not results and fail_reasons:
         resp["debug_fail_reasons"] = fail_reasons[:5]
 
@@ -681,7 +674,7 @@ def api_sanity_check_submit():
 def main():
     init_db()
     # 启动时预扫描 episodes
-    scan_buildai_episodes()
+    scan_factory_episodes()
     print(f"启动服务器在端口 {SERVER_PORT}")
     print(f"访问: http://localhost:{SERVER_PORT}")
     app.run(host="0.0.0.0", port=SERVER_PORT, debug=DEBUG_MODE, threaded=True)

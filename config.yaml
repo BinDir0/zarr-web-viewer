@@ -1,9 +1,7 @@
-# BuildAI 数据集查看器配置文件
-
-buildai_dataset_root: /share_data/lvjianan/datasets/BuildAI-processed/
-
-# 预生成的视频路径列表（每行一个 .mp4 路径），避免扫描文件系统
-episode_list_file: /share_data/guantianrui/facHaWoRy/videos_new.txt
+# WebDataset factory 配置
+factory_base: /share_data/guantianrui/datasets/Egocentric-100K/processed_v9_test_jpg
+factory_start: 1
+factory_end: 70
 
 server_port: 9472
 debug_mode: true
