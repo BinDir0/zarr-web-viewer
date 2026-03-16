@@ -11,11 +11,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import yaml
-from flask import Flask, abort, g, jsonify, render_template, request
-from PIL import Image, ImageDraw, ImageFont
-
-# 创建线程池用于并行处理图像
-IMAGE_PROCESSING_EXECUTOR = ThreadPoolExecutor(max_workers=16)
+from flask import Flask, g, jsonify, render_template, request
+from PIL import Image, ImageDraw
 
 # 加载配置
 with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
@@ -180,25 +177,38 @@ def load_episode_frames_from_shard(
     """从 tar shard 加载指定帧并绘制 YOLO 检测框，返回 base64 编码图像列表。"""
     results = []
 
+    # 预读所有需要的帧数据（同一 shard 只开一次文件句柄）
+    frame_data = {}
+    if frame_offsets is not None:
+        try:
+            with open(shard_path, "rb") as f:
+                for frame_idx in frame_indices:
+                    if 0 <= frame_idx < len(frame_names):
+                        offset, size = frame_offsets[frame_idx]
+                        f.seek(offset)
+                        frame_data[frame_idx] = f.read(size)
+        except Exception as e:
+            print(f"⚠ 读取 shard 失败 ({os.path.basename(shard_path)}): {e}")
+            return results
+    else:
+        # 无 offset 回退：用 tarfile（慢）
+        import tarfile
+        try:
+            with tarfile.open(shard_path, "r") as tar:
+                for frame_idx in frame_indices:
+                    if 0 <= frame_idx < len(frame_names):
+                        member = tar.getmember(frame_names[frame_idx])
+                        frame_data[frame_idx] = tar.extractfile(member).read()
+        except Exception as e:
+            print(f"⚠ 读取 tar 失败 ({os.path.basename(shard_path)}): {e}")
+            return results
+
     for frame_idx in frame_indices:
-        if frame_idx < 0 or frame_idx >= len(frame_names):
+        if frame_idx not in frame_data:
             continue
 
         try:
-            # 读取 JPEG 数据
-            if frame_offsets is not None:
-                offset, size = frame_offsets[frame_idx]
-                with open(shard_path, "rb") as f:
-                    f.seek(offset)
-                    jpeg_data = f.read(size)
-            else:
-                # 无 offset 回退：用 tarfile（慢）
-                import tarfile
-                with tarfile.open(shard_path, "r") as tar:
-                    member = tar.getmember(frame_names[frame_idx])
-                    jpeg_data = tar.extractfile(member).read()
-
-            img = Image.open(io.BytesIO(jpeg_data)).convert("RGB")
+            img = Image.open(io.BytesIO(frame_data[frame_idx])).convert("RGB")
 
             # 绘制左右手检测框（蓝=左手，红=右手）
             if frame_idx in frame_boxes:
@@ -230,7 +240,7 @@ def load_episode_frames_from_shard(
                 results.append(f"data:image/jpeg;base64,{b64}")
 
         except Exception as e:
-            print(f"⚠ 加载帧失败 (shard={os.path.basename(shard_path)}, frame={frame_idx}): {e}")
+            print(f"⚠ 解码帧失败 (shard={os.path.basename(shard_path)}, frame={frame_idx}): {e}")
 
     return results
 
