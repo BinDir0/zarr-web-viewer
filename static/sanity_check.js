@@ -437,6 +437,36 @@ function renderEpisode(episode, data) {
         const container = document.getElementById('episodesContainer');
         
         // 验证数据完整性
+        if (data.stage1_pending) {
+            // stage1 未完成，显示占位卡片
+            const episodeBlock = document.createElement('div');
+            episodeBlock.className = 'episode-block stage1-pending';
+            episodeBlock.dataset.episodeId = episode.id;
+
+            const header = document.createElement('div');
+            header.className = 'episode-header';
+            const title = document.createElement('div');
+            title.className = 'episode-title';
+            title.innerHTML = `
+                <span class="dataset-badge">${episode.dataset || 'Unknown'}</span>
+                <span>${episode.name || episode.id}</span>
+            `;
+            const info = document.createElement('div');
+            info.className = 'episode-info';
+            info.textContent = `${data.num_frames || '?'} frames`;
+            header.appendChild(title);
+            header.appendChild(info);
+
+            const pendingLabel = document.createElement('div');
+            pendingLabel.className = 'stage1-pending-label';
+            pendingLabel.textContent = 'Stage 1 (detect_track) 尚未完成，请先跳过标注';
+
+            episodeBlock.appendChild(header);
+            episodeBlock.appendChild(pendingLabel);
+            container.appendChild(episodeBlock);
+            return;
+        }
+
         if (!data.images || !Array.isArray(data.images) || data.images.length === 0) {
             console.warn(`Episode ${episode.id} 没有图像数据`, data);
             return;

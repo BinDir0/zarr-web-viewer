@@ -444,6 +444,31 @@ def api_episodes_sequential():
                 fail_reasons.append(f"0 frames: {ep['episode_id']}")
                 return None
 
+            # 检查 detect_track 是否已完成
+            seq_path = Path(ep["seq_folder"])
+            stage1_done = (
+                seq_path.exists()
+                and any(seq_path.glob("tracks_*/model_tracks.npy"))
+            )
+
+            if not stage1_done:
+                # stage1 未完成，返回占位 episode（无图片，前端显示提示）
+                result = {
+                    "success": True,
+                    "episode_id": ep["episode_id"],
+                    "episode_name": ep["episode_name"],
+                    "dataset_name": ep["dataset_name"],
+                    "episode_index": 0,
+                    "num_frames": num_frames,
+                    "start_idx": 0,
+                    "images": [],
+                    "frame_indices": [],
+                    "stage1_pending": True,
+                }
+                if ep["episode_id"] in annotation_status:
+                    result["annotation"] = annotation_status[ep["episode_id"]]
+                return result
+
             # 加载 track 数据，选取有检测框的帧
             frame_boxes = load_track_boxes(ep["seq_folder"])
             frame_indices = pick_frames_with_boxes(num_frames, frame_boxes)
