@@ -42,13 +42,63 @@ except ImportError:
 # ─── Episode 扫描与缓存 ───────────────────────────────────────────────
 
 _ALL_EPISODES: Optional[List[Dict]] = None
+_FACTORY_INDEXES: Dict[int, dict] = {}  # fid -> parsed index JSON, loaded on demand
+
+
+def _get_factory_index(fid: int) -> Optional[dict]:
+    """延迟加载并缓存单个 factory 的 _video_index.json。"""
+    if fid in _FACTORY_INDEXES:
+        return _FACTORY_INDEXES[fid]
+
+    factory_dir = os.path.join(FACTORY_BASE, f"factory{fid:03d}")
+    index_path = os.path.join(factory_dir, "_video_index.json")
+
+    if not os.path.exists(index_path):
+        _FACTORY_INDEXES[fid] = None
+        return None
+
+    try:
+        with open(index_path, "r") as f:
+            index = json.load(f)
+        _FACTORY_INDEXES[fid] = index
+        return index
+    except (json.JSONDecodeError, OSError):
+        _FACTORY_INDEXES[fid] = None
+        return None
+
+
+def _get_episode_frames(ep: Dict):
+    """从缓存的 factory index 中提取单个 episode 的帧名和 offset。"""
+    fid = ep["_fid"]
+    video_key = ep["episode_id"]
+
+    index = _get_factory_index(fid)
+    if index is None:
+        return None, None
+
+    info = index.get("videos", {}).get(video_key)
+    if info is None:
+        return None, None
+
+    frames = info.get("frames", [])
+    if not frames:
+        return [], None
+
+    if isinstance(frames[0], dict):
+        frame_names = [f["name"] for f in frames]
+        frame_offsets = [[f["offset"], f["size"]] for f in frames]
+    else:
+        frame_names = frames
+        frame_offsets = None
+
+    return frame_names, frame_offsets
 
 
 def scan_factory_episodes(force_rescan: bool = False) -> List[Dict]:
-    """扫描 factory range 中的所有视频，返回 episode 列表。
+    """扫描 factory range 中的所有视频，返回轻量 episode 列表。
 
-    从每个 factory 的 _video_index.json 加载（带帧 offset），
-    如果 index 不存在则跳过该 factory。
+    只存元数据（video_key, shard, num_frames 等），不存帧名/offset。
+    帧数据按需通过 _get_episode_frames() 延迟加载。
     """
     global _ALL_EPISODES
     if _ALL_EPISODES is not None and not force_rescan:
@@ -57,45 +107,26 @@ def scan_factory_episodes(force_rescan: bool = False) -> List[Dict]:
     episodes: List[Dict] = []
 
     for fid in range(FACTORY_START, FACTORY_END + 1):
+        index = _get_factory_index(fid)
+        if index is None:
+            continue
+
         factory_dir = os.path.join(FACTORY_BASE, f"factory{fid:03d}")
-        index_path = os.path.join(factory_dir, "_video_index.json")
-
-        if not os.path.exists(index_path):
-            continue
-
-        try:
-            with open(index_path, "r") as f:
-                index = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            continue
-
         videos = index.get("videos", {})
+
         for video_key, info in sorted(videos.items()):
             frames = info.get("frames", [])
             if not frames:
                 continue
 
-            shard_path = os.path.join(factory_dir, info["shard"])
-            seq_folder = os.path.join(factory_dir, "outputs", video_key)
-
-            # 新格式: frames 是 list of dict {name, offset, size}
-            # 旧格式: frames 是 list of str
-            if frames and isinstance(frames[0], dict):
-                frame_names = [f["name"] for f in frames]
-                frame_offsets = [[f["offset"], f["size"]] for f in frames]
-            else:
-                frame_names = frames
-                frame_offsets = None
-
             episodes.append({
                 "episode_id": video_key,
                 "episode_name": info.get("video_name", video_key),
                 "dataset_name": f"factory{fid:03d}",
-                "shard_path": shard_path,
-                "frame_names": frame_names,
-                "frame_offsets": frame_offsets,
-                "seq_folder": seq_folder,
-                "num_frames": len(frame_names),
+                "shard_path": os.path.join(factory_dir, info["shard"]),
+                "seq_folder": os.path.join(factory_dir, "outputs", video_key),
+                "num_frames": len(frames),
+                "_fid": fid,  # for lazy frame loading
             })
 
     _ALL_EPISODES = episodes
@@ -218,7 +249,7 @@ def load_episode_frames_from_shard(
                         color, label = "#00BFFF", f"L {conf:.2f}"
                     else:
                         color, label = "#FF4444", f"R {conf:.2f}"
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=12)
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=10)
                     draw.text((x1 + 2, y1 - 16), label, fill=color)
 
             # 缩放
@@ -417,10 +448,16 @@ def api_episodes_sequential():
             frame_boxes = load_track_boxes(ep["seq_folder"])
             frame_indices = pick_frames_with_boxes(num_frames, frame_boxes)
 
+            # 延迟加载帧名和 offset
+            frame_names, frame_offsets = _get_episode_frames(ep)
+            if frame_names is None or len(frame_names) == 0:
+                fail_reasons.append(f"no frame data for {ep['episode_id']}")
+                return None
+
             images = load_episode_frames_from_shard(
                 ep["shard_path"],
-                ep["frame_names"],
-                ep["frame_offsets"],
+                frame_names,
+                frame_offsets,
                 frame_indices,
                 frame_boxes,
             )
