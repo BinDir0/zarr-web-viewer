@@ -19,24 +19,19 @@
         }
 
         .header {
-            text-align: center;
-            margin-bottom: 20px;
-            padding: 20px 24px;
-            background: #1e2430;
-            border-radius: 10px;
-            border: 1px solid #2a3344;
-        }
-
-        .header h1 {
-            font-size: 26px;
-            margin-bottom: 12px;
-            font-weight: 600;
+            margin: 0 auto 16px;
+            padding: 0 4px;
+            max-width: 1400px;
         }
 
         .header .stats {
             font-size: 14px;
             color: #7d8a9e;
-            margin-top: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            min-height: 20px;
         }
 
         .controls {
@@ -297,10 +292,9 @@
 </head>
 <body>
     <div class="header">
-        <h1>返工标注（仅历史标为「有问题」的 Episode）</h1>
         <div class="stats">
             <span id="loadedCount">加载中...</span>
-            <span id="preloadStatus" style="margin-left: 20px; color: #56d364; font-size: 0.9em;"></span>
+            <span id="preloadStatus" style="color: #56d364; font-size: 0.9em;"></span>
         </div>
     </div>
 
