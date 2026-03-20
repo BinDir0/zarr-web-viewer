@@ -22,6 +22,17 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     FACTORY_BASE = config["factory_base"]
     FACTORY_START = int(config["factory_start"])
     FACTORY_END = int(config["factory_end"])
+    legacy_buildai_root = config.get("legacy_buildai_dataset_root", config.get("buildai_dataset_root"))
+    LEGACY_BUILDAI_ROOT = Path(legacy_buildai_root) if legacy_buildai_root else None
+    LEGACY_BUILDAI_EPISODE_LIST_FILE = config.get(
+        "legacy_buildai_episode_list_file",
+        config.get("episode_list_file"),
+    )
+    LEGACY_BUILDAI_DATASET_NAME = config.get("legacy_buildai_dataset_name", "BuildAI-10k")
+    legacy_buildai_annotations_db = config.get("legacy_buildai_annotations_db")
+    LEGACY_BUILDAI_ANNOTATIONS_DB = Path(legacy_buildai_annotations_db) if legacy_buildai_annotations_db else None
+    source_factory_annotations_db = config.get("source_factory_annotations_db")
+    SOURCE_FACTORY_ANNOTATIONS_DB = Path(source_factory_annotations_db) if source_factory_annotations_db else None
 
 DB_PATH = Path(__file__).parent / "annotations.db"
 
@@ -43,6 +54,7 @@ except ImportError:
 
 _ALL_EPISODES: Optional[List[Dict]] = None
 _FACTORY_INDEXES: Dict[int, dict] = {}  # fid -> parsed index JSON, loaded on demand
+_LEGACY_BUILDAI_EPISODES: Optional[List[Dict]] = None
 
 
 def _get_factory_index(fid: int) -> Optional[dict]:
@@ -132,6 +144,84 @@ def scan_factory_episodes(force_rescan: bool = False) -> List[Dict]:
     _ALL_EPISODES = episodes
     print(f"✓ 扫描完成: factory{FACTORY_START:03d}~factory{FACTORY_END:03d}, 共 {len(episodes)} 个 videos")
     return episodes
+
+
+def scan_legacy_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
+    """扫描旧版 BuildAI raw 数据集，仅供 rework 队列回放历史 flaw 数据。"""
+    global _LEGACY_BUILDAI_EPISODES
+
+    if _LEGACY_BUILDAI_EPISODES is not None and not force_rescan:
+        return _LEGACY_BUILDAI_EPISODES
+
+    episodes: List[Dict] = []
+
+    if LEGACY_BUILDAI_EPISODE_LIST_FILE and os.path.exists(LEGACY_BUILDAI_EPISODE_LIST_FILE):
+        print(f"📋 从旧 BuildAI 列表文件加载: {LEGACY_BUILDAI_EPISODE_LIST_FILE}")
+        with open(LEGACY_BUILDAI_EPISODE_LIST_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                crop_dir = line[:-4] if line.endswith(".mp4") else line
+                crop_path = Path(crop_dir)
+                episodes.append({
+                    "source_type": "legacy_buildai_raw",
+                    "episode_id": crop_path.name,
+                    "episode_name": crop_path.name,
+                    "dataset_name": LEGACY_BUILDAI_DATASET_NAME,
+                    "crop_dir": str(crop_path),
+                    "num_frames": -1,  # 延迟到实际加载时统计
+                })
+        _LEGACY_BUILDAI_EPISODES = episodes
+        print(f"✓ 旧 BuildAI 列表加载完成: 共 {len(episodes)} 个 episodes")
+        return episodes
+
+    if LEGACY_BUILDAI_ROOT is None:
+        _LEGACY_BUILDAI_EPISODES = episodes
+        return episodes
+
+    if not LEGACY_BUILDAI_ROOT.exists():
+        print(f"⚠ 旧 BuildAI raw 数据集路径不存在: {LEGACY_BUILDAI_ROOT}")
+        _LEGACY_BUILDAI_EPISODES = episodes
+        return episodes
+
+    print(f"🔍 扫描旧 BuildAI raw 数据集: {LEGACY_BUILDAI_ROOT}")
+    for extracted_dir in sorted(LEGACY_BUILDAI_ROOT.glob("*/*/processed/*/extracted_images")):
+        crop_dir = extracted_dir.parent
+        frame_count = len(list(extracted_dir.glob("*.jpg")))
+        if frame_count == 0:
+            continue
+        episodes.append({
+            "source_type": "legacy_buildai_raw",
+            "episode_id": crop_dir.name,
+            "episode_name": crop_dir.name,
+            "dataset_name": LEGACY_BUILDAI_DATASET_NAME,
+            "crop_dir": str(crop_dir),
+            "num_frames": frame_count,
+        })
+
+    _LEGACY_BUILDAI_EPISODES = episodes
+    print(f"✓ 旧 BuildAI 扫描完成: 共 {len(episodes)} 个 episodes")
+    return episodes
+
+
+def hydrate_legacy_buildai_episode(ep: Dict) -> Optional[Dict]:
+    """补齐旧 BuildAI raw episode 的实际帧数。"""
+    if ep.get("num_frames", -1) >= 0:
+        return ep
+
+    crop_path = Path(ep["crop_dir"])
+    extracted_dir = crop_path / "extracted_images"
+    if not extracted_dir.exists():
+        return None
+
+    frame_count = len(list(extracted_dir.glob("*.jpg")))
+    if frame_count <= 0:
+        return None
+
+    hydrated = dict(ep)
+    hydrated["num_frames"] = frame_count
+    return hydrated
 
 
 # ─── 图像加载与 YOLO Box 渲染 ─────────────────────────────────────────
@@ -276,6 +366,49 @@ def load_episode_frames_from_shard(
     return results
 
 
+def load_episode_frames_from_raw_buildai(
+    crop_dir: str,
+    frame_indices: List[int],
+    max_width: int = 640,
+) -> List[str]:
+    """从旧 BuildAI raw crop 目录读取帧并绘制 box。"""
+    crop_path = Path(crop_dir)
+    extracted_dir = crop_path / "extracted_images"
+    frame_boxes = load_track_boxes(crop_dir)
+    results: List[str] = []
+    for frame_idx in frame_indices:
+        img_path = extracted_dir / f"{frame_idx:06d}.jpg"
+        if not img_path.exists():
+            continue
+        try:
+            img = Image.open(img_path).convert("RGB")
+            if frame_idx in frame_boxes:
+                draw = ImageDraw.Draw(img)
+                for x1, y1, x2, y2, conf, handedness in frame_boxes[frame_idx]:
+                    if handedness == 0:
+                        color, label = "#00BFFF", f"L {conf:.2f}"
+                    else:
+                        color, label = "#FF4444", f"R {conf:.2f}"
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=5)
+                    draw.text((x1 + 2, y1 - 16), label, fill=color)
+
+            w, h = img.size
+            if w > max_width:
+                img = img.resize((max_width, int(h * max_width / w)), Image.Resampling.BILINEAR)
+
+            buf = io.BytesIO()
+            try:
+                img.save(buf, format="WEBP", quality=80, method=4)
+                results.append(f"data:image/webp;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}")
+            except Exception:
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=75)
+                results.append(f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}")
+        except Exception as e:
+            print(f"⚠ 旧 BuildAI 帧加载失败 ({img_path}): {e}")
+    return results
+
+
 # ─── 数据库 ───────────────────────────────────────────────────────────
 
 
@@ -411,22 +544,81 @@ def parse_rework_v1_payload(content: str) -> Optional[Dict]:
     return {"bad_box": _ints(raw.get("bad_box")), "not_clear": _ints(raw.get("not_clear"))}
 
 
-def get_legacy_bad_episode_ids(conn: sqlite3.Connection) -> List[str]:
-    """仅包含仍标记为 BAD_FRAMES/BAD_FRAME 的 episode（返工提交后变为 REWORK_V1 会自动出队）。"""
-    rows = conn.execute(
-        """
-        SELECT episode_id FROM annotations
-        WHERE content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%'
+def _fetch_annotation_rows(conn: sqlite3.Connection, where_sql: str) -> List[sqlite3.Row]:
+    return conn.execute(
+        f"""
+        SELECT episode_id, episode_name, dataset_name, episode_index, content
+        FROM annotations
+        WHERE {where_sql}
         ORDER BY rowid
         """
     ).fetchall()
+
+
+def load_legacy_buildai_annotation_rows() -> List[Dict]:
+    """读取旧 BuildAI flaw 数据库中的 BAD_FRAME(S) 记录。"""
+    return load_bad_annotation_rows_from_db(LEGACY_BUILDAI_ANNOTATIONS_DB, "旧 BuildAI flaw")
+
+
+def load_bad_annotation_rows_from_db(db_path: Optional[Path], label: str) -> List[Dict]:
+    """读取外部 source flaw 数据库中的 BAD_FRAME(S) 记录。"""
+    if db_path is None:
+        return []
+    if not db_path.exists():
+        print(f"⚠ {label} 数据库不存在: {db_path}")
+        return []
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = _fetch_annotation_rows(conn, "content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%'")
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"⚠ 读取 {label} 数据库失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def build_rework_queue_rows(
+    local_rows: List[sqlite3.Row],
+    source_rows: List[Dict],
+    factory_lookup: Dict[str, Dict],
+    legacy_buildai_lookup: Dict[str, Dict],
+) -> List[Dict]:
+    """合并 source flaw 数据库与本地 REWORK 结果，生成有效队列。"""
+    local_by_id: Dict[str, Dict] = {row["episode_id"]: dict(row) for row in local_rows}
+    if source_rows:
+        base_rows = source_rows
+    else:
+        base_rows = [
+            dict(row)
+            for row in local_rows
+            if row["content"].startswith("BAD_FRAMES:") or row["content"].startswith("BAD_FRAME:")
+        ]
+
+    merged: List[Dict] = []
     seen = set()
-    out: List[str] = []
-    for (eid,) in rows:
-        if eid not in seen:
-            seen.add(eid)
-            out.append(eid)
-    return out
+
+    for row in base_rows:
+        eid = row["episode_id"]
+        if eid in seen:
+            continue
+        if eid not in factory_lookup and eid not in legacy_buildai_lookup:
+            continue
+        local_row = local_by_id.get(eid)
+        if local_row and str(local_row.get("content", "")).startswith("REWORK_V1:"):
+            continue
+        seen.add(eid)
+        if local_row and (
+            str(local_row.get("content", "")).startswith("BAD_FRAMES:")
+            or str(local_row.get("content", "")).startswith("BAD_FRAME:")
+        ):
+            merged.append(local_row)
+        else:
+            merged.append(dict(row))
+
+    return merged
 
 
 def build_rework_frame_indices(
@@ -661,13 +853,23 @@ def api_episodes_sequential():
 @app.route("/api/rework/total", methods=["GET"])
 def api_rework_total():
     conn = get_db_connection()
-    bad_ids = get_legacy_bad_episode_ids(conn)
-    return jsonify({"success": True, "total_episodes": len(bad_ids)})
+    factory_lookup = {e["episode_id"]: e for e in scan_factory_episodes()}
+    legacy_buildai_lookup = {e["episode_id"]: e for e in scan_legacy_buildai_episodes()}
+    local_rows = _fetch_annotation_rows(
+        conn,
+        "(content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%' OR content LIKE 'REWORK_V1:%')",
+    )
+    source_rows = (
+        load_bad_annotation_rows_from_db(SOURCE_FACTORY_ANNOTATIONS_DB, "100k flaw source")
+        + load_legacy_buildai_annotation_rows()
+    )
+    rows = build_rework_queue_rows(local_rows, source_rows, factory_lookup, legacy_buildai_lookup)
+    return jsonify({"success": True, "total_episodes": len(rows)})
 
 
 @app.route("/api/rework/episodes", methods=["GET"])
 def api_rework_episodes():
-    """分页加载仍标记为 BAD_FRAMES/BAD_FRAME 的 episode；帧集合 = 历史错帧 ∪ 原抽样帧。"""
+    """分页加载仍标记为 BAD_FRAMES/BAD_FRAME 的 episode，兼容 factory 与旧 BuildAI raw 数据源。"""
     timer_start = time.time()
     timers: Dict[str, float] = {}
 
@@ -677,11 +879,20 @@ def api_rework_episodes():
 
     t0 = time.time()
     conn = get_db_connection()
-    bad_ids = get_legacy_bad_episode_ids(conn)
     id_to_ep = {e["episode_id"]: e for e in scan_factory_episodes()}
+    legacy_buildai_lookup = {e["episode_id"]: e for e in scan_legacy_buildai_episodes()}
+    local_rows = _fetch_annotation_rows(
+        conn,
+        "(content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%' OR content LIKE 'REWORK_V1:%')",
+    )
+    source_rows = (
+        load_bad_annotation_rows_from_db(SOURCE_FACTORY_ANNOTATIONS_DB, "100k flaw source")
+        + load_legacy_buildai_annotation_rows()
+    )
+    bad_rows = build_rework_queue_rows(local_rows, source_rows, id_to_ep, legacy_buildai_lookup)
     timers["scan_and_db"] = time.time() - t0
 
-    total_bad = len(bad_ids)
+    total_bad = len(bad_rows)
     if total_bad == 0:
         return jsonify(
             {
@@ -705,63 +916,87 @@ def api_rework_episodes():
         ), 400
 
     end_idx = min(global_offset + max(1, limit), total_bad)
-    batch_ids = bad_ids[global_offset:end_idx]
+    batch_rows: List[Dict] = bad_rows[global_offset:end_idx]
+    batch_ids = [row["episode_id"] for row in batch_rows]
     next_offset = end_idx if end_idx < total_bad else 0
 
-    batch = [id_to_ep[i] for i in batch_ids if i in id_to_ep]
-
     t1 = time.time()
-    ann_rows = []
+    ann_rows: List[sqlite3.Row] = []
     if batch_ids:
         ph = ",".join(["?"] * len(batch_ids))
         ann_rows = conn.execute(
-            f"SELECT episode_id, content FROM annotations WHERE episode_id IN ({ph})",
+            f"""
+            SELECT episode_id, content
+            FROM annotations
+            WHERE episode_id IN ({ph})
+            """,
             batch_ids,
         ).fetchall()
     timers["db_query"] = time.time() - t1
 
-    legacy_bad_by_ep: Dict[str, List[int]] = {}
     rework_prefill: Dict[str, Dict] = {}
     for ep_id, content in ann_rows:
-        legacy_bad_by_ep[ep_id] = parse_legacy_bad_frame_indices(content)
         rw = parse_rework_v1_payload(content)
         if rw:
             rework_prefill[ep_id] = rw
 
     fail_reasons: List[str] = []
 
-    def process_rework_episode(ep: Dict) -> Optional[Dict]:
+    def process_rework_episode(row: Dict) -> Optional[Dict]:
         try:
+            ep_id = row["episode_id"]
+            content = row["content"]
+            ep = id_to_ep.get(ep_id)
+            if ep is None:
+                ep = hydrate_legacy_buildai_episode(legacy_buildai_lookup.get(ep_id))
+            if ep is None:
+                fail_reasons.append(f"未找到可回放数据源: {ep_id}")
+                return None
+
             num_frames = ep["num_frames"]
             if num_frames == 0:
-                fail_reasons.append(f"0 frames: {ep['episode_id']}")
+                fail_reasons.append(f"0 frames: {ep_id}")
                 return None
+
+            result: Dict = {
+                "success": True,
+                "episode_id": ep["episode_id"],
+                "episode_name": row.get("episode_name") or ep["episode_name"],
+                "dataset_name": row.get("dataset_name") or ep["dataset_name"],
+                "episode_index": row.get("episode_index", ep.get("episode_index", 0)),
+                "num_frames": num_frames,
+                "start_idx": ep.get("start_idx", 0),
+                "legacy_bad_frames": parse_legacy_bad_frame_indices(content),
+                "rework_annotation": rework_prefill.get(ep_id),
+            }
+
+            if ep.get("source_type") == "legacy_buildai_raw":
+                frame_boxes = load_track_boxes(ep["crop_dir"])
+                legacy_bad = parse_legacy_bad_frame_indices(content)
+                frame_indices = build_rework_frame_indices(num_frames, frame_boxes, legacy_bad)
+                images = load_episode_frames_from_raw_buildai(ep["crop_dir"], frame_indices)
+                if not images:
+                    fail_reasons.append(f"legacy raw frames empty for {ep_id}")
+                    return None
+                result["images"] = images
+                result["frame_indices"] = frame_indices
+                return result
 
             seq_path = Path(ep["seq_folder"])
             stage1_done = seq_path.exists() and any(seq_path.glob("tracks_*/model_tracks.npy"))
             if not stage1_done:
-                return {
-                    "success": True,
-                    "episode_id": ep["episode_id"],
-                    "episode_name": ep["episode_name"],
-                    "dataset_name": ep["dataset_name"],
-                    "episode_index": 0,
-                    "num_frames": num_frames,
-                    "start_idx": 0,
-                    "images": [],
-                    "frame_indices": [],
-                    "stage1_pending": True,
-                    "legacy_bad_frames": legacy_bad_by_ep.get(ep["episode_id"], []),
-                    "rework_annotation": rework_prefill.get(ep["episode_id"]),
-                }
+                result["images"] = []
+                result["frame_indices"] = []
+                result["stage1_pending"] = True
+                return result
 
             frame_boxes = load_track_boxes(ep["seq_folder"])
-            legacy_bad = legacy_bad_by_ep.get(ep["episode_id"], [])
+            legacy_bad = parse_legacy_bad_frame_indices(content)
             frame_indices = build_rework_frame_indices(num_frames, frame_boxes, legacy_bad)
 
             frame_names, frame_offsets = _get_episode_frames(ep)
             if frame_names is None or len(frame_names) == 0:
-                fail_reasons.append(f"no frame data for {ep['episode_id']}")
+                fail_reasons.append(f"no frame data for {ep_id}")
                 return None
 
             images = load_episode_frames_from_shard(
@@ -772,31 +1007,20 @@ def api_rework_episodes():
                 frame_boxes,
             )
             if not images:
-                fail_reasons.append(f"load_episode_frames returned empty for {ep['episode_id']}")
+                fail_reasons.append(f"load_episode_frames returned empty for {ep_id}")
                 return None
 
-            result: Dict = {
-                "success": True,
-                "episode_id": ep["episode_id"],
-                "episode_name": ep["episode_name"],
-                "dataset_name": ep["dataset_name"],
-                "episode_index": 0,
-                "num_frames": num_frames,
-                "start_idx": 0,
-                "images": images,
-                "frame_indices": frame_indices,
-                "legacy_bad_frames": legacy_bad,
-                "rework_annotation": rework_prefill.get(ep["episode_id"]),
-            }
+            result["images"] = images
+            result["frame_indices"] = frame_indices
             return result
         except Exception as e:
-            fail_reasons.append(f"exception: {e} for {ep['episode_id']}")
+            fail_reasons.append(f"exception: {e} for {row['episode_id']}")
             return None
 
     t2 = time.time()
     results: List[Dict] = []
     with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = [executor.submit(process_rework_episode, ep) for ep in batch]
+        futures = [executor.submit(process_rework_episode, row) for row in batch_rows]
         for future in futures:
             r = future.result()
             if r is not None:
@@ -807,13 +1031,14 @@ def api_rework_episodes():
     timers["total"] = total_time
     timers["other"] = total_time - sum(v for k, v in timers.items() if k not in ("total", "other"))
 
-    missing = [i for i in batch_ids if i not in id_to_ep]
-    for mid in missing[:5]:
-        fail_reasons.append(f"factory 中无此 episode: {mid}")
-
     print(f"\n{'=' * 60}")
     print(f"[rework/{user_id[:8]}] offset={global_offset}, limit={limit}, 待返工总数={total_bad}")
-    print(f"  本批请求 id 数: {len(batch_ids)}, 命中 factory: {len(batch)}, 成功加载: {len(results)}")
+    print(
+        f"  本批请求 id 数: {len(batch_ids)}, "
+        f"factory 命中: {sum(1 for i in batch_ids if i in id_to_ep)}, "
+        f"legacy raw 命中: {sum(1 for i in batch_ids if i in legacy_buildai_lookup)}, "
+        f"成功加载: {len(results)}"
+    )
     print(f"{'=' * 60}\n")
 
     resp = {

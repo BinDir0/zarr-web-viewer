@@ -3,5 +3,12 @@ factory_base: /share_data/guantianrui/datasets/Egocentric-100K/processed_v9_test
 factory_start: 1
 factory_end: 70
 
+# 旧 BuildAI 10k raw 数据集（用于 rework 合并旧 flaw 队列）
+legacy_buildai_dataset_root: /share_data/lvjianan/datasets/BuildAI-processed
+legacy_buildai_dataset_name: BuildAI-10k
+# 100k flaw source DB；当前仓库本地 annotations.db 仅作为 REWORK_V1 输出/覆盖层
+source_factory_annotations_db: /home/guantianrui/zarr-web-viewer-100k/zarr-web-viewer/annotations.db
+legacy_buildai_annotations_db: /share_data/guantianrui/EgoYOLO/annotations.db
+
 server_port: 9472
 debug_mode: true
