@@ -747,8 +747,6 @@ def build_rework_queue_rows(
         if not is_supported_rework_episode_id(eid, factory_lookup):
             continue
         local_row = local_by_id.get(eid)
-        if local_row and str(local_row.get("content", "")).startswith("REWORK_V1:"):
-            continue
         seen.add(eid)
         if local_row and (
             str(local_row.get("content", "")).startswith("BAD_FRAMES:")
