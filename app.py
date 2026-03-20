@@ -691,27 +691,12 @@ def build_rework_queue_rows(
 
 def build_rework_frame_indices(
     num_frames: int,
-    frame_boxes: Dict[int, list],
     legacy_bad: List[int],
     max_frames: int = REWORK_MAX_FRAMES_PER_EPISODE,
 ) -> List[int]:
-    """合并：历史标错的帧 + 与现逻辑一致的抽样帧，控制上限。"""
-    picks = pick_frames_with_boxes(num_frames, frame_boxes)
+    """仅保留历史标为问题的帧，控制上限。"""
     legacy_ok = sorted({i for i in legacy_bad if isinstance(i, int) and 0 <= i < num_frames})
-    merged = sorted(set(legacy_ok) | set(picks))
-    if len(merged) <= max_frames:
-        return merged
-    out: List[int] = []
-    for i in legacy_ok:
-        if len(out) >= max_frames:
-            break
-        out.append(i)
-    for p in picks:
-        if len(out) >= max_frames:
-            break
-        if p not in out:
-            out.append(p)
-    return sorted(out)[:max_frames]
+    return legacy_ok[:max_frames]
 
 
 # ─── 路由 ─────────────────────────────────────────────────────────────
@@ -1028,6 +1013,12 @@ def api_rework_episodes():
                 fail_reasons.append(f"0 frames: {ep_id}")
                 return None
 
+            legacy_bad = parse_legacy_bad_frame_indices(content)
+            frame_indices = build_rework_frame_indices(num_frames, legacy_bad)
+            if not frame_indices:
+                fail_reasons.append(f"no valid bad frames for {ep_id}")
+                return None
+
             result: Dict = {
                 "success": True,
                 "episode_id": ep["episode_id"],
@@ -1036,14 +1027,11 @@ def api_rework_episodes():
                 "episode_index": row.get("episode_index", ep.get("episode_index", 0)),
                 "num_frames": num_frames,
                 "start_idx": ep.get("start_idx", 0),
-                "legacy_bad_frames": parse_legacy_bad_frame_indices(content),
+                "legacy_bad_frames": legacy_bad,
                 "rework_annotation": rework_prefill.get(ep_id),
             }
 
             if ep.get("source_type") == "legacy_buildai_raw":
-                frame_boxes = load_track_boxes(ep["crop_dir"])
-                legacy_bad = parse_legacy_bad_frame_indices(content)
-                frame_indices = build_rework_frame_indices(num_frames, frame_boxes, legacy_bad)
                 images = load_episode_frames_from_raw_buildai(ep["crop_dir"], frame_indices)
                 if not images:
                     fail_reasons.append(f"legacy raw frames empty for {ep_id}")
@@ -1060,15 +1048,12 @@ def api_rework_episodes():
                 result["stage1_pending"] = True
                 return result
 
-            frame_boxes = load_track_boxes(ep["seq_folder"])
-            legacy_bad = parse_legacy_bad_frame_indices(content)
-            frame_indices = build_rework_frame_indices(num_frames, frame_boxes, legacy_bad)
-
             frame_names, frame_offsets = _get_episode_frames(ep)
             if frame_names is None or len(frame_names) == 0:
                 fail_reasons.append(f"no frame data for {ep_id}")
                 return None
 
+            frame_boxes = load_track_boxes(ep["seq_folder"])
             images = load_episode_frames_from_shard(
                 ep["shard_path"],
                 frame_names,

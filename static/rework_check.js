@@ -289,16 +289,9 @@ function renderEpisode(episode, data) {
     info.className = 'episode-info';
     info.textContent = `${data.num_frames != null ? data.num_frames : '?'} frames`;
 
-    const legacyTag = document.createElement('div');
-    legacyTag.className = 'legacy-tag';
-    const lb = data.legacy_bad_frames || [];
-    legacyTag.textContent =
-        lb.length > 0 ? `曾标问题帧: ${lb.join(', ')}` : '历史标记为本条有问题';
-
     header.appendChild(title);
     header.appendChild(info);
     block.appendChild(header);
-    block.appendChild(legacyTag);
 
     const framesContainer = document.createElement('div');
     framesContainer.className = 'frames-container';
