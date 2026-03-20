@@ -33,6 +33,20 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     LEGACY_BUILDAI_ANNOTATIONS_DB = Path(legacy_buildai_annotations_db) if legacy_buildai_annotations_db else None
     source_factory_annotations_db = config.get("source_factory_annotations_db")
     SOURCE_FACTORY_ANNOTATIONS_DB = Path(source_factory_annotations_db) if source_factory_annotations_db else None
+    FACTORY_EPISODES_CACHE_FILE = Path(
+        config.get(
+            "factory_episode_cache_file",
+            str(Path(__file__).parent / f".factory_episodes_cache_{FACTORY_START}_{FACTORY_END}.json"),
+        )
+    )
+    default_legacy_cache = (
+        LEGACY_BUILDAI_ROOT / "_vla_episodes_cache.json"
+        if LEGACY_BUILDAI_ROOT is not None
+        else Path(__file__).parent / ".legacy_buildai_episodes_cache.json"
+    )
+    LEGACY_BUILDAI_EPISODES_CACHE_FILE = Path(
+        config.get("legacy_buildai_episode_cache_file", str(default_legacy_cache))
+    )
 
 DB_PATH = Path(__file__).parent / "annotations.db"
 
@@ -55,6 +69,46 @@ except ImportError:
 _ALL_EPISODES: Optional[List[Dict]] = None
 _FACTORY_INDEXES: Dict[int, dict] = {}  # fid -> parsed index JSON, loaded on demand
 _LEGACY_BUILDAI_EPISODES: Optional[List[Dict]] = None
+EPISODE_CACHE_VERSION = 1
+
+
+def _load_episode_cache(cache_file: Path, cache_key: Dict) -> Optional[List[Dict]]:
+    """从磁盘缓存加载 episode 列表。"""
+    if not cache_file.exists():
+        return None
+    try:
+        with open(cache_file, "r") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("version") != EPISODE_CACHE_VERSION:
+            return None
+        if payload.get("cache_key") != cache_key:
+            return None
+        episodes = payload.get("episodes")
+        if not isinstance(episodes, list):
+            return None
+        print(f"✓ 从缓存加载 episodes: {cache_file} ({len(episodes)} 条)")
+        return episodes
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+        print(f"⚠ 读取 episode 缓存失败 ({cache_file}): {e}")
+        return None
+
+
+def _save_episode_cache(cache_file: Path, cache_key: Dict, episodes: List[Dict]) -> None:
+    """将 episode 列表写入磁盘缓存。"""
+    payload = {
+        "version": EPISODE_CACHE_VERSION,
+        "cache_key": cache_key,
+        "episodes": episodes,
+    }
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_file, "w") as f:
+            json.dump(payload, f)
+        print(f"✓ 已写入 episode 缓存: {cache_file}")
+    except OSError as e:
+        print(f"⚠ 写入 episode 缓存失败 ({cache_file}): {e}")
 
 
 def _get_factory_index(fid: int) -> Optional[dict]:
@@ -116,6 +170,18 @@ def scan_factory_episodes(force_rescan: bool = False) -> List[Dict]:
     if _ALL_EPISODES is not None and not force_rescan:
         return _ALL_EPISODES
 
+    cache_key = {
+        "type": "factory",
+        "factory_base": FACTORY_BASE,
+        "factory_start": FACTORY_START,
+        "factory_end": FACTORY_END,
+    }
+    if not force_rescan:
+        cached = _load_episode_cache(FACTORY_EPISODES_CACHE_FILE, cache_key)
+        if cached is not None:
+            _ALL_EPISODES = cached
+            return cached
+
     episodes: List[Dict] = []
 
     for fid in range(FACTORY_START, FACTORY_END + 1):
@@ -142,6 +208,7 @@ def scan_factory_episodes(force_rescan: bool = False) -> List[Dict]:
             })
 
     _ALL_EPISODES = episodes
+    _save_episode_cache(FACTORY_EPISODES_CACHE_FILE, cache_key, episodes)
     print(f"✓ 扫描完成: factory{FACTORY_START:03d}~factory{FACTORY_END:03d}, 共 {len(episodes)} 个 videos")
     return episodes
 
@@ -152,6 +219,18 @@ def scan_legacy_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
 
     if _LEGACY_BUILDAI_EPISODES is not None and not force_rescan:
         return _LEGACY_BUILDAI_EPISODES
+
+    cache_key = {
+        "type": "legacy_buildai_raw",
+        "legacy_buildai_root": str(LEGACY_BUILDAI_ROOT) if LEGACY_BUILDAI_ROOT is not None else "",
+        "legacy_buildai_episode_list_file": LEGACY_BUILDAI_EPISODE_LIST_FILE or "",
+        "legacy_buildai_dataset_name": LEGACY_BUILDAI_DATASET_NAME,
+    }
+    if not force_rescan:
+        cached = _load_episode_cache(LEGACY_BUILDAI_EPISODES_CACHE_FILE, cache_key)
+        if cached is not None:
+            _LEGACY_BUILDAI_EPISODES = cached
+            return cached
 
     episodes: List[Dict] = []
 
@@ -173,6 +252,7 @@ def scan_legacy_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
                     "num_frames": -1,  # 延迟到实际加载时统计
                 })
         _LEGACY_BUILDAI_EPISODES = episodes
+        _save_episode_cache(LEGACY_BUILDAI_EPISODES_CACHE_FILE, cache_key, episodes)
         print(f"✓ 旧 BuildAI 列表加载完成: 共 {len(episodes)} 个 episodes")
         return episodes
 
@@ -201,6 +281,7 @@ def scan_legacy_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
         })
 
     _LEGACY_BUILDAI_EPISODES = episodes
+    _save_episode_cache(LEGACY_BUILDAI_EPISODES_CACHE_FILE, cache_key, episodes)
     print(f"✓ 旧 BuildAI 扫描完成: 共 {len(episodes)} 个 episodes")
     return episodes
 
