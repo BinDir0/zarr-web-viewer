@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import yaml
-from flask import Flask, g, jsonify, render_template, request
+from flask import Flask, g, jsonify, redirect, render_template, request
 from PIL import Image, ImageDraw
 
 # 加载配置
@@ -733,7 +733,7 @@ def build_rework_frame_indices(
 
 @app.route("/")
 def index():
-    return render_template("sanity_check.html")
+    return redirect("/rework")
 
 
 @app.route("/sanity-check")
