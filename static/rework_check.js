@@ -473,4 +473,5 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('setOffsetBtn').addEventListener('click', setStartOffset);
     document.getElementById('submitBtn').addEventListener('click', submitAndLoadNext);
     document.getElementById('submitExitBtn').addEventListener('click', submitAndExit);
+    loadEpisodes(true);
 });

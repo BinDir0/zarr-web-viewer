@@ -58,9 +58,12 @@ except ImportError:
 # ─── Episode 扫描与缓存 ───────────────────────────────────────────────
 
 _ALL_EPISODES: Optional[List[Dict]] = None
+_FACTORY_EPISODE_LOOKUP: Optional[Dict[str, Dict]] = None
 _FACTORY_INDEXES: Dict[int, dict] = {}  # fid -> parsed index JSON, loaded on demand
 EPISODE_CACHE_VERSION = 1
 _FACTORY_SCAN_LOCK = Lock()
+_BAD_SOURCE_ROWS_CACHE: Dict[str, Dict] = {}
+_BAD_SOURCE_ROWS_LOCK = Lock()
 
 
 def _load_episode_cache(cache_file: Path, cache_key: Dict) -> Optional[List[Dict]]:
@@ -204,12 +207,13 @@ def scan_factory_episodes(force_rescan: bool = False) -> List[Dict]:
     只存元数据（video_key, shard, num_frames 等），不存帧名/offset。
     帧数据按需通过 _get_episode_frames() 延迟加载。
     """
-    global _ALL_EPISODES
+    global _ALL_EPISODES, _FACTORY_EPISODE_LOOKUP
     if _ALL_EPISODES is not None and not force_rescan:
         return _ALL_EPISODES
     with _FACTORY_SCAN_LOCK:
         if _ALL_EPISODES is not None and not force_rescan:
             return _ALL_EPISODES
+        _FACTORY_EPISODE_LOOKUP = None
 
         cache_key = {
             "type": "factory",
@@ -252,6 +256,14 @@ def scan_factory_episodes(force_rescan: bool = False) -> List[Dict]:
         _save_episode_cache(FACTORY_EPISODES_CACHE_FILE, cache_key, episodes)
         print(f"✓ 扫描完成: factory{FACTORY_START:03d}~factory{FACTORY_END:03d}, 共 {len(episodes)} 个 videos")
         return episodes
+
+
+def get_factory_episode_lookup() -> Dict[str, Dict]:
+    """返回 episode_id -> episode 的惰性索引。"""
+    global _FACTORY_EPISODE_LOOKUP
+    if _FACTORY_EPISODE_LOOKUP is None:
+        _FACTORY_EPISODE_LOOKUP = {e["episode_id"]: e for e in scan_factory_episodes()}
+    return _FACTORY_EPISODE_LOOKUP
 
 
 def hydrate_legacy_buildai_episode(ep: Dict) -> Optional[Dict]:
@@ -609,6 +621,14 @@ def load_legacy_buildai_annotation_rows() -> List[Dict]:
     return load_bad_annotation_rows_from_db(LEGACY_BUILDAI_ANNOTATIONS_DB, "旧 BuildAI flaw")
 
 
+def _get_bad_rows_cache_signature(db_path: Path) -> Optional[tuple]:
+    try:
+        st = db_path.stat()
+        return (str(db_path.resolve()), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def load_bad_annotation_rows_from_db(db_path: Optional[Path], label: str) -> List[Dict]:
     """读取外部 source flaw 数据库中的 BAD_FRAME(S) 记录。"""
     if db_path is None:
@@ -617,16 +637,36 @@ def load_bad_annotation_rows_from_db(db_path: Optional[Path], label: str) -> Lis
         print(f"⚠ {label} 数据库不存在: {db_path}")
         return []
 
+    signature = _get_bad_rows_cache_signature(db_path)
+    cache_key = str(db_path.resolve())
+    if signature is not None:
+        with _BAD_SOURCE_ROWS_LOCK:
+            cached = _BAD_SOURCE_ROWS_CACHE.get(cache_key)
+            if cached and cached.get("signature") == signature:
+                return cached["rows"]
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
         rows = _fetch_annotation_rows(conn, "content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%'")
-        return [dict(row) for row in rows]
+        out = [dict(row) for row in rows]
+        if signature is not None:
+            with _BAD_SOURCE_ROWS_LOCK:
+                _BAD_SOURCE_ROWS_CACHE[cache_key] = {"signature": signature, "rows": out}
+        return out
     except Exception as e:
         print(f"⚠ 读取 {label} 数据库失败: {e}")
         return []
     finally:
         conn.close()
+
+
+def load_rework_source_rows() -> List[Dict]:
+    """加载返工来源 flaw rows，优先走进程内缓存。"""
+    return (
+        load_bad_annotation_rows_from_db(SOURCE_FACTORY_ANNOTATIONS_DB, "100k flaw source")
+        + load_legacy_buildai_annotation_rows()
+    )
 
 
 def build_legacy_buildai_lookup(candidate_rows: List[Dict], factory_lookup: Dict[str, Dict]) -> Dict[str, Dict]:
@@ -648,11 +688,17 @@ def build_legacy_buildai_lookup(candidate_rows: List[Dict], factory_lookup: Dict
     return lookup
 
 
+def is_supported_rework_episode_id(episode_id: str, factory_lookup: Dict[str, Dict]) -> bool:
+    """判断 rework 条目是否属于当前支持的 factory 或 legacy BuildAI raw。"""
+    if episode_id in factory_lookup:
+        return True
+    return LEGACY_BUILDAI_ROOT is not None and _LEGACY_BUILDAI_EPISODE_RE.match(episode_id) is not None
+
+
 def build_rework_queue_rows(
     local_rows: List[sqlite3.Row],
     source_rows: List[Dict],
     factory_lookup: Dict[str, Dict],
-    legacy_buildai_lookup: Dict[str, Dict],
 ) -> List[Dict]:
     """合并 source flaw 数据库与本地 REWORK 结果，生成有效队列。"""
     local_by_id: Dict[str, Dict] = {row["episode_id"]: dict(row) for row in local_rows}
@@ -672,7 +718,7 @@ def build_rework_queue_rows(
         eid = row["episode_id"]
         if eid in seen:
             continue
-        if eid not in factory_lookup and eid not in legacy_buildai_lookup:
+        if not is_supported_rework_episode_id(eid, factory_lookup):
             continue
         local_row = local_by_id.get(eid)
         if local_row and str(local_row.get("content", "")).startswith("REWORK_V1:"):
@@ -906,18 +952,13 @@ def api_episodes_sequential():
 @app.route("/api/rework/total", methods=["GET"])
 def api_rework_total():
     conn = get_db_connection()
-    factory_lookup = {e["episode_id"]: e for e in scan_factory_episodes()}
+    factory_lookup = get_factory_episode_lookup()
     local_rows = _fetch_annotation_rows(
         conn,
         "(content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%' OR content LIKE 'REWORK_V1:%')",
     )
-    source_rows = (
-        load_bad_annotation_rows_from_db(SOURCE_FACTORY_ANNOTATIONS_DB, "100k flaw source")
-        + load_legacy_buildai_annotation_rows()
-    )
-    candidate_rows = source_rows if source_rows else [dict(row) for row in local_rows]
-    legacy_buildai_lookup = build_legacy_buildai_lookup(candidate_rows, factory_lookup)
-    rows = build_rework_queue_rows(local_rows, source_rows, factory_lookup, legacy_buildai_lookup)
+    source_rows = load_rework_source_rows()
+    rows = build_rework_queue_rows(local_rows, source_rows, factory_lookup)
     return jsonify({"success": True, "total_episodes": len(rows)})
 
 
@@ -933,18 +974,13 @@ def api_rework_episodes():
 
     t0 = time.time()
     conn = get_db_connection()
-    id_to_ep = {e["episode_id"]: e for e in scan_factory_episodes()}
+    id_to_ep = get_factory_episode_lookup()
     local_rows = _fetch_annotation_rows(
         conn,
         "(content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%' OR content LIKE 'REWORK_V1:%')",
     )
-    source_rows = (
-        load_bad_annotation_rows_from_db(SOURCE_FACTORY_ANNOTATIONS_DB, "100k flaw source")
-        + load_legacy_buildai_annotation_rows()
-    )
-    candidate_rows = source_rows if source_rows else [dict(row) for row in local_rows]
-    legacy_buildai_lookup = build_legacy_buildai_lookup(candidate_rows, id_to_ep)
-    bad_rows = build_rework_queue_rows(local_rows, source_rows, id_to_ep, legacy_buildai_lookup)
+    source_rows = load_rework_source_rows()
+    bad_rows = build_rework_queue_rows(local_rows, source_rows, id_to_ep)
     timers["scan_and_db"] = time.time() - t0
 
     total_bad = len(bad_rows)
@@ -972,6 +1008,7 @@ def api_rework_episodes():
 
     end_idx = min(global_offset + max(1, limit), total_bad)
     batch_rows: List[Dict] = bad_rows[global_offset:end_idx]
+    legacy_buildai_lookup = build_legacy_buildai_lookup(batch_rows, id_to_ep)
     batch_ids = [row["episode_id"] for row in batch_rows]
     next_offset = end_idx if end_idx < total_bad else 0
 
