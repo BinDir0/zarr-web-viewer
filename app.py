@@ -19,6 +19,7 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     config = yaml.safe_load(f)
     SERVER_PORT = int(config.get("server_port", 9470))
     DEBUG_MODE = bool(config.get("debug_mode", True))
+    USE_RELOADER = bool(config.get("use_reloader", False))
     FACTORY_BASE = config["factory_base"]
     FACTORY_START = int(config["factory_start"])
     FACTORY_END = int(config["factory_end"])
@@ -1382,11 +1383,15 @@ def api_sanity_check_submit():
 
 def main():
     init_db()
-    # 启动时预扫描 episodes
-    scan_factory_episodes()
+    should_preload = (not USE_RELOADER) or (os.environ.get("WERKZEUG_RUN_MAIN") == "true")
+    if should_preload:
+        # 启动时预扫描 episodes；若启用 Werkzeug reloader，仅在实际服务进程中执行一次。
+        scan_factory_episodes()
+    else:
+        print("跳过 reloader 父进程中的预扫描，等待实际服务进程启动")
     print(f"启动服务器在端口 {SERVER_PORT}")
     print(f"访问: http://localhost:{SERVER_PORT}")
-    app.run(host="0.0.0.0", port=SERVER_PORT, debug=DEBUG_MODE, threaded=True)
+    app.run(host="0.0.0.0", port=SERVER_PORT, debug=DEBUG_MODE, use_reloader=USE_RELOADER, threaded=True)
 
 
 if __name__ == "__main__":

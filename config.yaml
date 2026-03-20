@@ -14,3 +14,4 @@ legacy_buildai_annotations_db: /share_data/guantianrui/EgoYOLO/annotations.db
 
 server_port: 9472
 debug_mode: true
+use_reloader: false
