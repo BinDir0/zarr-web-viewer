@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import os
+import re
 import sqlite3
 import time
 from threading import Lock
@@ -15,11 +16,6 @@ import yaml
 from flask import Flask, g, jsonify, redirect, render_template, request
 from PIL import Image, ImageDraw
 
-try:
-    from tqdm import tqdm
-except ImportError:
-    tqdm = None
-
 # 加载配置
 with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     config = yaml.safe_load(f)
@@ -31,10 +27,6 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     FACTORY_END = int(config["factory_end"])
     legacy_buildai_root = config.get("legacy_buildai_dataset_root", config.get("buildai_dataset_root"))
     LEGACY_BUILDAI_ROOT = Path(legacy_buildai_root) if legacy_buildai_root else None
-    LEGACY_BUILDAI_EPISODE_LIST_FILE = config.get(
-        "legacy_buildai_episode_list_file",
-        config.get("episode_list_file"),
-    )
     LEGACY_BUILDAI_DATASET_NAME = config.get("legacy_buildai_dataset_name", "BuildAI-10k")
     legacy_buildai_annotations_db = config.get("legacy_buildai_annotations_db")
     LEGACY_BUILDAI_ANNOTATIONS_DB = Path(legacy_buildai_annotations_db) if legacy_buildai_annotations_db else None
@@ -45,10 +37,6 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
             "factory_episode_cache_file",
             str(Path(__file__).parent / f".factory_episodes_cache_{FACTORY_START}_{FACTORY_END}.json"),
         )
-    )
-    default_legacy_cache = Path(__file__).parent / ".legacy_buildai_episodes_cache.json"
-    LEGACY_BUILDAI_EPISODES_CACHE_FILE = Path(
-        config.get("legacy_buildai_episode_cache_file", str(default_legacy_cache))
     )
 
 DB_PATH = Path(__file__).parent / "annotations.db"
@@ -71,10 +59,8 @@ except ImportError:
 
 _ALL_EPISODES: Optional[List[Dict]] = None
 _FACTORY_INDEXES: Dict[int, dict] = {}  # fid -> parsed index JSON, loaded on demand
-_LEGACY_BUILDAI_EPISODES: Optional[List[Dict]] = None
 EPISODE_CACHE_VERSION = 1
 _FACTORY_SCAN_LOCK = Lock()
-_LEGACY_BUILDAI_SCAN_LOCK = Lock()
 
 
 def _load_episode_cache(cache_file: Path, cache_key: Dict) -> Optional[List[Dict]]:
@@ -130,41 +116,37 @@ def _count_jpg_files(dir_path: Path) -> int:
         return 0
 
 
-def _iter_legacy_buildai_crop_dirs(root: Path):
-    """按 factory/worker/processed 层级遍历旧 BuildAI crop 目录。"""
-    try:
-        factory_entries = [entry for entry in os.scandir(root) if entry.is_dir()]
-    except OSError as e:
-        print(f"⚠ 枚举旧 BuildAI 根目录失败 ({root}): {e}")
-        return
+_LEGACY_BUILDAI_EPISODE_RE = re.compile(r"^factory(?P<factory>\d{3})_worker(?P<worker>\d{3})_.+_crop\d+$")
 
-    factory_entries.sort(key=lambda entry: entry.name)
-    iterator = factory_entries
-    if tqdm is not None and factory_entries:
-        iterator = tqdm(factory_entries, desc="扫描旧 BuildAI", unit="factory")
 
-    for factory_entry in iterator:
-        try:
-            worker_entries = [entry for entry in os.scandir(factory_entry.path) if entry.is_dir()]
-        except OSError:
-            continue
-        worker_entries.sort(key=lambda entry: entry.name)
+def resolve_legacy_buildai_episode(
+    episode_id: str,
+    episode_name: Optional[str] = None,
+    dataset_name: Optional[str] = None,
+) -> Optional[Dict]:
+    """按 episode_id 直接反推旧 BuildAI raw crop 目录，无需全量扫描。"""
+    if LEGACY_BUILDAI_ROOT is None:
+        return None
 
-        for worker_entry in worker_entries:
-            processed_dir = Path(worker_entry.path) / "processed"
-            if not processed_dir.is_dir():
-                continue
+    match = _LEGACY_BUILDAI_EPISODE_RE.match(episode_id)
+    if match is None:
+        return None
 
-            try:
-                crop_entries = [entry for entry in os.scandir(processed_dir) if entry.is_dir()]
-            except OSError:
-                continue
-            crop_entries.sort(key=lambda entry: entry.name)
+    factory_id = match.group("factory")
+    worker_id = match.group("worker")
+    crop_dir = LEGACY_BUILDAI_ROOT / f"factory_{factory_id}" / f"worker_{worker_id}" / "processed" / episode_id
+    extracted_dir = crop_dir / "extracted_images"
+    if not extracted_dir.is_dir():
+        return None
 
-            for crop_entry in crop_entries:
-                extracted_dir = Path(crop_entry.path) / "extracted_images"
-                if extracted_dir.is_dir():
-                    yield Path(crop_entry.path)
+    return {
+        "source_type": "legacy_buildai_raw",
+        "episode_id": episode_id,
+        "episode_name": episode_name or episode_id,
+        "dataset_name": dataset_name or LEGACY_BUILDAI_DATASET_NAME,
+        "crop_dir": str(crop_dir),
+        "num_frames": -1,  # 延迟到真正加载该 episode 时再统计
+    }
 
 
 def _get_factory_index(fid: int) -> Optional[dict]:
@@ -269,78 +251,6 @@ def scan_factory_episodes(force_rescan: bool = False) -> List[Dict]:
         _ALL_EPISODES = episodes
         _save_episode_cache(FACTORY_EPISODES_CACHE_FILE, cache_key, episodes)
         print(f"✓ 扫描完成: factory{FACTORY_START:03d}~factory{FACTORY_END:03d}, 共 {len(episodes)} 个 videos")
-        return episodes
-
-
-def scan_legacy_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
-    """扫描旧版 BuildAI raw 数据集，仅供 rework 队列回放历史 flaw 数据。"""
-    global _LEGACY_BUILDAI_EPISODES
-
-    if _LEGACY_BUILDAI_EPISODES is not None and not force_rescan:
-        return _LEGACY_BUILDAI_EPISODES
-    with _LEGACY_BUILDAI_SCAN_LOCK:
-        if _LEGACY_BUILDAI_EPISODES is not None and not force_rescan:
-            return _LEGACY_BUILDAI_EPISODES
-
-        cache_key = {
-            "type": "legacy_buildai_raw",
-            "legacy_buildai_root": str(LEGACY_BUILDAI_ROOT) if LEGACY_BUILDAI_ROOT is not None else "",
-            "legacy_buildai_episode_list_file": LEGACY_BUILDAI_EPISODE_LIST_FILE or "",
-            "legacy_buildai_dataset_name": LEGACY_BUILDAI_DATASET_NAME,
-        }
-        if not force_rescan:
-            cached = _load_episode_cache(LEGACY_BUILDAI_EPISODES_CACHE_FILE, cache_key)
-            if cached is not None:
-                _LEGACY_BUILDAI_EPISODES = cached
-                return cached
-
-        episodes: List[Dict] = []
-
-        if LEGACY_BUILDAI_EPISODE_LIST_FILE and os.path.exists(LEGACY_BUILDAI_EPISODE_LIST_FILE):
-            print(f"📋 从旧 BuildAI 列表文件加载: {LEGACY_BUILDAI_EPISODE_LIST_FILE}")
-            with open(LEGACY_BUILDAI_EPISODE_LIST_FILE, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    crop_dir = line[:-4] if line.endswith(".mp4") else line
-                    crop_path = Path(crop_dir)
-                    episodes.append({
-                        "source_type": "legacy_buildai_raw",
-                        "episode_id": crop_path.name,
-                        "episode_name": crop_path.name,
-                        "dataset_name": LEGACY_BUILDAI_DATASET_NAME,
-                        "crop_dir": str(crop_path),
-                        "num_frames": -1,  # 延迟到实际加载时统计
-                    })
-            _LEGACY_BUILDAI_EPISODES = episodes
-            _save_episode_cache(LEGACY_BUILDAI_EPISODES_CACHE_FILE, cache_key, episodes)
-            print(f"✓ 旧 BuildAI 列表加载完成: 共 {len(episodes)} 个 episodes")
-            return episodes
-
-        if LEGACY_BUILDAI_ROOT is None:
-            _LEGACY_BUILDAI_EPISODES = episodes
-            return episodes
-
-        if not LEGACY_BUILDAI_ROOT.exists():
-            print(f"⚠ 旧 BuildAI raw 数据集路径不存在: {LEGACY_BUILDAI_ROOT}")
-            _LEGACY_BUILDAI_EPISODES = episodes
-            return episodes
-
-        print(f"🔍 扫描旧 BuildAI raw 数据集: {LEGACY_BUILDAI_ROOT}")
-        for crop_dir in _iter_legacy_buildai_crop_dirs(LEGACY_BUILDAI_ROOT):
-            episodes.append({
-                "source_type": "legacy_buildai_raw",
-                "episode_id": crop_dir.name,
-                "episode_name": crop_dir.name,
-                "dataset_name": LEGACY_BUILDAI_DATASET_NAME,
-                "crop_dir": str(crop_dir),
-                "num_frames": -1,  # 延迟到真正加载该 episode 时再统计
-            })
-
-        _LEGACY_BUILDAI_EPISODES = episodes
-        _save_episode_cache(LEGACY_BUILDAI_EPISODES_CACHE_FILE, cache_key, episodes)
-        print(f"✓ 旧 BuildAI 扫描完成: 共 {len(episodes)} 个 episodes")
         return episodes
 
 
@@ -719,6 +629,25 @@ def load_bad_annotation_rows_from_db(db_path: Optional[Path], label: str) -> Lis
         conn.close()
 
 
+def build_legacy_buildai_lookup(candidate_rows: List[Dict], factory_lookup: Dict[str, Dict]) -> Dict[str, Dict]:
+    """只为当前坏条目按需解析旧 BuildAI raw 路径，不做全量扫描。"""
+    lookup: Dict[str, Dict] = {}
+    seen = set()
+    for row in candidate_rows:
+        eid = row["episode_id"]
+        if eid in seen or eid in factory_lookup:
+            continue
+        seen.add(eid)
+        ep = resolve_legacy_buildai_episode(
+            eid,
+            episode_name=row.get("episode_name"),
+            dataset_name=row.get("dataset_name"),
+        )
+        if ep is not None:
+            lookup[eid] = ep
+    return lookup
+
+
 def build_rework_queue_rows(
     local_rows: List[sqlite3.Row],
     source_rows: List[Dict],
@@ -993,7 +922,6 @@ def api_episodes_sequential():
 def api_rework_total():
     conn = get_db_connection()
     factory_lookup = {e["episode_id"]: e for e in scan_factory_episodes()}
-    legacy_buildai_lookup = {e["episode_id"]: e for e in scan_legacy_buildai_episodes()}
     local_rows = _fetch_annotation_rows(
         conn,
         "(content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%' OR content LIKE 'REWORK_V1:%')",
@@ -1002,6 +930,8 @@ def api_rework_total():
         load_bad_annotation_rows_from_db(SOURCE_FACTORY_ANNOTATIONS_DB, "100k flaw source")
         + load_legacy_buildai_annotation_rows()
     )
+    candidate_rows = source_rows if source_rows else [dict(row) for row in local_rows]
+    legacy_buildai_lookup = build_legacy_buildai_lookup(candidate_rows, factory_lookup)
     rows = build_rework_queue_rows(local_rows, source_rows, factory_lookup, legacy_buildai_lookup)
     return jsonify({"success": True, "total_episodes": len(rows)})
 
@@ -1019,7 +949,6 @@ def api_rework_episodes():
     t0 = time.time()
     conn = get_db_connection()
     id_to_ep = {e["episode_id"]: e for e in scan_factory_episodes()}
-    legacy_buildai_lookup = {e["episode_id"]: e for e in scan_legacy_buildai_episodes()}
     local_rows = _fetch_annotation_rows(
         conn,
         "(content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%' OR content LIKE 'REWORK_V1:%')",
@@ -1028,6 +957,8 @@ def api_rework_episodes():
         load_bad_annotation_rows_from_db(SOURCE_FACTORY_ANNOTATIONS_DB, "100k flaw source")
         + load_legacy_buildai_annotation_rows()
     )
+    candidate_rows = source_rows if source_rows else [dict(row) for row in local_rows]
+    legacy_buildai_lookup = build_legacy_buildai_lookup(candidate_rows, id_to_ep)
     bad_rows = build_rework_queue_rows(local_rows, source_rows, id_to_ep, legacy_buildai_lookup)
     timers["scan_and_db"] = time.time() - t0
 
@@ -1442,11 +1373,10 @@ def main():
     init_db()
     should_preload = (not USE_RELOADER) or (os.environ.get("WERKZEUG_RUN_MAIN") == "true")
     if should_preload:
-        # 启动时预扫描并写缓存；若启用 Werkzeug reloader，仅在实际服务进程中执行一次。
+        # 启动时只预热 factory episode 缓存；旧 BuildAI 在 rework 请求里按 episode_id 直接解析。
         scan_factory_episodes()
-        scan_legacy_buildai_episodes()
     else:
-        print("跳过 reloader 父进程中的预扫描，等待实际服务进程启动")
+        print("跳过 reloader 父进程中的 factory 预热，等待实际服务进程启动")
     print(f"启动服务器在端口 {SERVER_PORT}")
     print(f"访问: http://localhost:{SERVER_PORT}")
     app.run(host="0.0.0.0", port=SERVER_PORT, debug=DEBUG_MODE, use_reloader=USE_RELOADER, threaded=True)
