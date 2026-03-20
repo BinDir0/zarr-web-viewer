@@ -557,7 +557,6 @@ def init_db() -> None:
 # ─── 历史「标 X」episode（BAD_FRAMES / BAD_FRAME）与返工标注 ─────────────
 
 REWORK_MAX_FRAMES_PER_EPISODE = 24
-REWORK_BATCH_SIZE = int(config.get("rework_batch_size", 48))
 
 
 def parse_legacy_bad_frame_indices(content: str) -> List[int]:
@@ -969,7 +968,7 @@ def api_rework_episodes():
     timer_start = time.time()
     timers: Dict[str, float] = {}
 
-    limit = request.args.get("limit", default=REWORK_BATCH_SIZE, type=int)
+    limit = request.args.get("limit", default=210, type=int)
     global_offset = request.args.get("offset", default=0, type=int)
     user_id = request.args.get("user_id", default="anonymous", type=str)
 
