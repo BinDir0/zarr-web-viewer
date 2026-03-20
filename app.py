@@ -64,6 +64,8 @@ EPISODE_CACHE_VERSION = 1
 _FACTORY_SCAN_LOCK = Lock()
 _BAD_SOURCE_ROWS_CACHE: Dict[str, Dict] = {}
 _BAD_SOURCE_ROWS_LOCK = Lock()
+_TRACKS_PATH_CACHE: Dict[str, Optional[str]] = {}
+_TRACKS_PATH_LOCK = Lock()
 
 
 def _load_episode_cache(cache_file: Path, cache_key: Dict) -> Optional[List[Dict]]:
@@ -288,24 +290,43 @@ def hydrate_legacy_buildai_episode(ep: Dict) -> Optional[Dict]:
 # ─── 图像加载与 YOLO Box 渲染 ─────────────────────────────────────────
 
 
-def load_track_boxes(seq_folder: str) -> Dict[int, list]:
+def find_model_tracks_path(seq_folder: str) -> Optional[Path]:
+    """定位 seq/crop 目录下的 model_tracks.npy，并缓存结果。"""
+    seq_path = Path(seq_folder)
+    cache_key = str(seq_path.resolve())
+
+    with _TRACKS_PATH_LOCK:
+        cached = _TRACKS_PATH_CACHE.get(cache_key)
+        if cached is not None:
+            return Path(cached) if cached else None
+
+    if not seq_path.exists():
+        tracks_path = None
+    else:
+        tracks_dirs = sorted(seq_path.glob("tracks_*"))
+        if not tracks_dirs:
+            tracks_path = None
+        else:
+            candidate = tracks_dirs[0] / "model_tracks.npy"
+            tracks_path = candidate if candidate.exists() else None
+
+    with _TRACKS_PATH_LOCK:
+        _TRACKS_PATH_CACHE[cache_key] = str(tracks_path) if tracks_path is not None else ""
+
+    return tracks_path
+
+
+def load_track_boxes(seq_folder: str, target_frames: Optional[set] = None) -> Dict[int, list]:
     """加载 model_tracks.npy，返回 per-frame box 查找表。
 
     Returns:
         {frame_idx: [(x1, y1, x2, y2, conf, voted_handedness), ...]}
     """
-    seq_path = Path(seq_folder)
     frame_boxes: Dict[int, list] = {}
-
-    if not seq_path.exists():
+    tracks_path = find_model_tracks_path(seq_folder)
+    if tracks_path is None:
         return frame_boxes
 
-    tracks_dirs = sorted(seq_path.glob("tracks_*"))
-    if not tracks_dirs:
-        return frame_boxes
-    tracks_path = tracks_dirs[0] / "model_tracks.npy"
-    if not tracks_path.exists():
-        return frame_boxes
     try:
         tracks_data = np.load(str(tracks_path), allow_pickle=True).item()
         for track_id, detections in tracks_data.items():
@@ -313,12 +334,14 @@ def load_track_boxes(seq_folder: str) -> Dict[int, list]:
             voted_h = 1 if sum(1 for h in all_h if h > 0) > len(all_h) / 2 else 0
             for det in detections:
                 f = det["frame"]
+                if target_frames is not None and f not in target_frames:
+                    continue
                 box = det["det_box"][0]
                 frame_boxes.setdefault(f, []).append(
                     (float(box[0]), float(box[1]), float(box[2]), float(box[3]), float(box[4]), voted_h)
                 )
     except Exception as e:
-        print(f"⚠ 加载 model_tracks 失败 ({seq_path.name}): {e}")
+        print(f"⚠ 加载 model_tracks 失败 ({tracks_path.parent.parent.name}): {e}")
     return frame_boxes
 
 
@@ -400,7 +423,7 @@ def load_episode_frames_from_shard(
                         color, label = "#00BFFF", f"L {conf:.2f}"
                     else:
                         color, label = "#FF4444", f"R {conf:.2f}"
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=10)
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=BOX_OUTLINE_WIDTH)
                     draw.text((x1 + 2, y1 - 16), label, fill=color)
 
             # 缩放
@@ -430,12 +453,14 @@ def load_episode_frames_from_shard(
 def load_episode_frames_from_raw_buildai(
     crop_dir: str,
     frame_indices: List[int],
+    frame_boxes: Optional[Dict[int, list]] = None,
     max_width: int = 640,
 ) -> List[str]:
     """从旧 BuildAI raw crop 目录读取帧并绘制 box。"""
     crop_path = Path(crop_dir)
     extracted_dir = crop_path / "extracted_images"
-    frame_boxes = load_track_boxes(crop_dir)
+    if frame_boxes is None:
+        frame_boxes = load_track_boxes(crop_dir, target_frames=set(frame_indices))
     results: List[str] = []
     for frame_idx in frame_indices:
         img_path = extracted_dir / f"{frame_idx:06d}.jpg"
@@ -450,7 +475,7 @@ def load_episode_frames_from_raw_buildai(
                         color, label = "#00BFFF", f"L {conf:.2f}"
                     else:
                         color, label = "#FF4444", f"R {conf:.2f}"
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=5)
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=BOX_OUTLINE_WIDTH)
                     draw.text((x1 + 2, y1 - 16), label, fill=color)
 
             w, h = img.size
@@ -557,6 +582,7 @@ def init_db() -> None:
 # ─── 历史「标 X」episode（BAD_FRAMES / BAD_FRAME）与返工标注 ─────────────
 
 REWORK_MAX_FRAMES_PER_EPISODE = 24
+BOX_OUTLINE_WIDTH = 10
 
 
 def parse_legacy_bad_frame_indices(content: str) -> List[int]:
@@ -838,11 +864,7 @@ def api_episodes_sequential():
                 return None
 
             # 检查 detect_track 是否已完成
-            seq_path = Path(ep["seq_folder"])
-            stage1_done = (
-                seq_path.exists()
-                and any(seq_path.glob("tracks_*/model_tracks.npy"))
-            )
+            stage1_done = find_model_tracks_path(ep["seq_folder"]) is not None
 
             if not stage1_done:
                 # stage1 未完成，返回占位 episode（无图片，前端显示提示）
@@ -1008,7 +1030,9 @@ def api_rework_episodes():
 
     end_idx = min(global_offset + max(1, limit), total_bad)
     batch_rows: List[Dict] = bad_rows[global_offset:end_idx]
+    t1 = time.time()
     legacy_buildai_lookup = build_legacy_buildai_lookup(batch_rows, id_to_ep)
+    timers["resolve_legacy_batch"] = time.time() - t1
     batch_ids = [row["episode_id"] for row in batch_rows]
     next_offset = end_idx if end_idx < total_bad else 0
 
@@ -1069,7 +1093,8 @@ def api_rework_episodes():
             }
 
             if ep.get("source_type") == "legacy_buildai_raw":
-                images = load_episode_frames_from_raw_buildai(ep["crop_dir"], frame_indices)
+                frame_boxes = load_track_boxes(ep["crop_dir"], target_frames=set(frame_indices))
+                images = load_episode_frames_from_raw_buildai(ep["crop_dir"], frame_indices, frame_boxes=frame_boxes)
                 if not images:
                     fail_reasons.append(f"legacy raw frames empty for {ep_id}")
                     return None
@@ -1077,8 +1102,7 @@ def api_rework_episodes():
                 result["frame_indices"] = frame_indices
                 return result
 
-            seq_path = Path(ep["seq_folder"])
-            stage1_done = seq_path.exists() and any(seq_path.glob("tracks_*/model_tracks.npy"))
+            stage1_done = find_model_tracks_path(ep["seq_folder"]) is not None
             if not stage1_done:
                 result["images"] = []
                 result["frame_indices"] = []
@@ -1090,7 +1114,7 @@ def api_rework_episodes():
                 fail_reasons.append(f"no frame data for {ep_id}")
                 return None
 
-            frame_boxes = load_track_boxes(ep["seq_folder"])
+            frame_boxes = load_track_boxes(ep["seq_folder"], target_frames=set(frame_indices))
             images = load_episode_frames_from_shard(
                 ep["shard_path"],
                 frame_names,
@@ -1130,6 +1154,14 @@ def api_rework_episodes():
         f"factory 命中: {sum(1 for i in batch_ids if i in id_to_ep)}, "
         f"legacy raw 命中: {sum(1 for i in batch_ids if i in legacy_buildai_lookup)}, "
         f"成功加载: {len(results)}"
+    )
+    print(
+        "  耗时: "
+        f"scan_and_db={timers.get('scan_and_db', 0):.2f}s, "
+        f"resolve_legacy_batch={timers.get('resolve_legacy_batch', 0):.2f}s, "
+        f"db_query={timers.get('db_query', 0):.2f}s, "
+        f"load_and_encode={timers.get('load_and_encode', 0):.2f}s, "
+        f"total={timers.get('total', 0):.2f}s"
     )
     print(f"{'=' * 60}\n")
 
