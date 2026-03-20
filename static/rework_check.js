@@ -4,6 +4,7 @@
  */
 
 const FRAME_STATE_SEP = '\u0001';
+const REWORK_BATCH_SIZE = 48;
 const LABELS = {
     ok: '',
     bad_box: '手部可见，标注框错误',
@@ -84,7 +85,7 @@ async function preloadNextBatch() {
         const userId = getUserId();
         const nextOffset = currentOffset;
         const response = await fetch(
-            `/api/rework/episodes?user_id=${encodeURIComponent(userId)}&limit=210&offset=${nextOffset}`,
+            `/api/rework/episodes?user_id=${encodeURIComponent(userId)}&limit=${REWORK_BATCH_SIZE}&offset=${nextOffset}`,
             { signal: preloadAbortController.signal }
         );
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -149,7 +150,7 @@ async function loadEpisodes(clearStates) {
         } else {
             await cancelPreload();
             const response = await fetch(
-                `/api/rework/episodes?user_id=${encodeURIComponent(userId)}&limit=210&offset=${currentOffset}`
+                `/api/rework/episodes?user_id=${encodeURIComponent(userId)}&limit=${REWORK_BATCH_SIZE}&offset=${currentOffset}`
             );
             if (!response.ok) {
                 let msg = `HTTP ${response.status}`;
