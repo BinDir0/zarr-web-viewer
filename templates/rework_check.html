@@ -33,48 +33,6 @@
             font-weight: 600;
         }
 
-        .hint-box {
-            max-width: 920px;
-            margin: 0 auto;
-            text-align: left;
-            font-size: 14px;
-            line-height: 1.65;
-            color: #aeb8c9;
-            background: rgba(0, 0, 0, 0.25);
-            padding: 14px 18px;
-            border-radius: 8px;
-            border-left: 4px solid #3d8bfd;
-        }
-
-        .hint-box strong {
-            color: #e8eaed;
-        }
-
-        .legend {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 16px 28px;
-            margin-top: 14px;
-            font-size: 13px;
-        }
-
-        .legend span {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 3px;
-        }
-
-        .dot.ok { background: transparent; border: 2px solid #5cb85c; }
-        .dot.bad { background: rgba(255, 140, 66, 0.85); }
-        .dot.nc { background: rgba(138, 99, 210, 0.9); }
-
         .header .stats {
             font-size: 14px;
             color: #7d8a9e;
@@ -340,16 +298,6 @@
 <body>
     <div class="header">
         <h1>返工标注（仅历史标为「有问题」的 Episode）</h1>
-        <div class="hint-box">
-            <strong>操作尽量少：</strong>不用点 = 该帧<strong>正确</strong>。需要改时<strong>反复点击图片</strong>即可循环：
-            <strong>正确 → 标注框错误 → 手部不清晰 → 正确</strong>。<br>
-            遮罩上会显示说明文字，请按实际观感选择；本页只列出数据库里仍为「BAD_FRAMES」的条目，提交后写入新格式并从此队列移除。
-        </div>
-        <div class="legend">
-            <span><i class="dot ok"></i> 无遮罩 = 正确</span>
-            <span><i class="dot bad"></i> 橙遮罩 = 手部可见，框错</span>
-            <span><i class="dot nc"></i> 紫遮罩 = 手部非清晰可见</span>
-        </div>
         <div class="stats">
             <span id="loadedCount">加载中...</span>
             <span id="preloadStatus" style="margin-left: 20px; color: #56d364; font-size: 0.9em;"></span>
