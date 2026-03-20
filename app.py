@@ -15,6 +15,11 @@ import yaml
 from flask import Flask, g, jsonify, redirect, render_template, request
 from PIL import Image, ImageDraw
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
 # 加载配置
 with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     config = yaml.safe_load(f)
@@ -109,6 +114,57 @@ def _save_episode_cache(cache_file: Path, cache_key: Dict, episodes: List[Dict])
         print(f"✓ 已写入 episode 缓存: {cache_file}")
     except OSError as e:
         print(f"⚠ 写入 episode 缓存失败 ({cache_file}): {e}")
+
+
+def _count_jpg_files(dir_path: Path) -> int:
+    """快速统计目录中的 jpg/jpeg 文件数量。"""
+    try:
+        with os.scandir(dir_path) as it:
+            return sum(
+                1
+                for entry in it
+                if entry.is_file()
+                and entry.name.lower().endswith((".jpg", ".jpeg"))
+            )
+    except OSError:
+        return 0
+
+
+def _iter_legacy_buildai_crop_dirs(root: Path):
+    """按 factory/worker/processed 层级遍历旧 BuildAI crop 目录。"""
+    try:
+        factory_entries = [entry for entry in os.scandir(root) if entry.is_dir()]
+    except OSError as e:
+        print(f"⚠ 枚举旧 BuildAI 根目录失败 ({root}): {e}")
+        return
+
+    factory_entries.sort(key=lambda entry: entry.name)
+    iterator = factory_entries
+    if tqdm is not None and factory_entries:
+        iterator = tqdm(factory_entries, desc="扫描旧 BuildAI", unit="factory")
+
+    for factory_entry in iterator:
+        try:
+            worker_entries = [entry for entry in os.scandir(factory_entry.path) if entry.is_dir()]
+        except OSError:
+            continue
+        worker_entries.sort(key=lambda entry: entry.name)
+
+        for worker_entry in worker_entries:
+            processed_dir = Path(worker_entry.path) / "processed"
+            if not processed_dir.is_dir():
+                continue
+
+            try:
+                crop_entries = [entry for entry in os.scandir(processed_dir) if entry.is_dir()]
+            except OSError:
+                continue
+            crop_entries.sort(key=lambda entry: entry.name)
+
+            for crop_entry in crop_entries:
+                extracted_dir = Path(crop_entry.path) / "extracted_images"
+                if extracted_dir.is_dir():
+                    yield Path(crop_entry.path)
 
 
 def _get_factory_index(fid: int) -> Optional[dict]:
@@ -272,18 +328,14 @@ def scan_legacy_buildai_episodes(force_rescan: bool = False) -> List[Dict]:
             return episodes
 
         print(f"🔍 扫描旧 BuildAI raw 数据集: {LEGACY_BUILDAI_ROOT}")
-        for extracted_dir in sorted(LEGACY_BUILDAI_ROOT.glob("*/*/processed/*/extracted_images")):
-            crop_dir = extracted_dir.parent
-            frame_count = len(list(extracted_dir.glob("*.jpg")))
-            if frame_count == 0:
-                continue
+        for crop_dir in _iter_legacy_buildai_crop_dirs(LEGACY_BUILDAI_ROOT):
             episodes.append({
                 "source_type": "legacy_buildai_raw",
                 "episode_id": crop_dir.name,
                 "episode_name": crop_dir.name,
                 "dataset_name": LEGACY_BUILDAI_DATASET_NAME,
                 "crop_dir": str(crop_dir),
-                "num_frames": frame_count,
+                "num_frames": -1,  # 延迟到真正加载该 episode 时再统计
             })
 
         _LEGACY_BUILDAI_EPISODES = episodes
@@ -302,7 +354,7 @@ def hydrate_legacy_buildai_episode(ep: Dict) -> Optional[Dict]:
     if not extracted_dir.exists():
         return None
 
-    frame_count = len(list(extracted_dir.glob("*.jpg")))
+    frame_count = _count_jpg_files(extracted_dir)
     if frame_count <= 0:
         return None
 
