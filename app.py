@@ -360,6 +360,100 @@ def init_db() -> None:
         conn.close()
 
 
+# ─── 历史「标 X」episode（BAD_FRAMES / BAD_FRAME）与返工标注 ─────────────
+
+REWORK_MAX_FRAMES_PER_EPISODE = 24
+
+
+def parse_legacy_bad_frame_indices(content: str) -> List[int]:
+    """解析旧版 sanity 标注中的问题帧索引（相对 episode）。"""
+    if not content:
+        return []
+    if content.startswith("BAD_FRAMES:"):
+        bad_str = content[len("BAD_FRAMES:") :]
+    elif content.startswith("BAD_FRAME:"):
+        bad_str = content[len("BAD_FRAME:") :]
+    else:
+        return []
+    out: List[int] = []
+    for x in bad_str.split(","):
+        x = x.strip()
+        if not x:
+            continue
+        try:
+            out.append(int(x))
+        except ValueError:
+            continue
+    return out
+
+
+def parse_rework_v1_payload(content: str) -> Optional[Dict]:
+    """解析返工标注 REWORK_V1:{json}，用于回填 UI。"""
+    if not content or not content.startswith("REWORK_V1:"):
+        return None
+    try:
+        raw = json.loads(content[len("REWORK_V1:") :])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    def _ints(seq) -> List[int]:
+        out: List[int] = []
+        if not isinstance(seq, list):
+            return out
+        for x in seq:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    return {"bad_box": _ints(raw.get("bad_box")), "not_clear": _ints(raw.get("not_clear"))}
+
+
+def get_legacy_bad_episode_ids(conn: sqlite3.Connection) -> List[str]:
+    """仅包含仍标记为 BAD_FRAMES/BAD_FRAME 的 episode（返工提交后变为 REWORK_V1 会自动出队）。"""
+    rows = conn.execute(
+        """
+        SELECT episode_id FROM annotations
+        WHERE content LIKE 'BAD_FRAMES:%' OR content LIKE 'BAD_FRAME:%'
+        ORDER BY rowid
+        """
+    ).fetchall()
+    seen = set()
+    out: List[str] = []
+    for (eid,) in rows:
+        if eid not in seen:
+            seen.add(eid)
+            out.append(eid)
+    return out
+
+
+def build_rework_frame_indices(
+    num_frames: int,
+    frame_boxes: Dict[int, list],
+    legacy_bad: List[int],
+    max_frames: int = REWORK_MAX_FRAMES_PER_EPISODE,
+) -> List[int]:
+    """合并：历史标错的帧 + 与现逻辑一致的抽样帧，控制上限。"""
+    picks = pick_frames_with_boxes(num_frames, frame_boxes)
+    legacy_ok = sorted({i for i in legacy_bad if isinstance(i, int) and 0 <= i < num_frames})
+    merged = sorted(set(legacy_ok) | set(picks))
+    if len(merged) <= max_frames:
+        return merged
+    out: List[int] = []
+    for i in legacy_ok:
+        if len(out) >= max_frames:
+            break
+        out.append(i)
+    for p in picks:
+        if len(out) >= max_frames:
+            break
+        if p not in out:
+            out.append(p)
+    return sorted(out)[:max_frames]
+
+
 # ─── 路由 ─────────────────────────────────────────────────────────────
 
 
@@ -371,6 +465,12 @@ def index():
 @app.route("/sanity-check")
 def sanity_check():
     return render_template("sanity_check.html")
+
+
+@app.route("/rework")
+def rework_check():
+    """仅审核历史标为 X（BAD_FRAMES）的 episode，三态帧标注。"""
+    return render_template("rework_check.html")
 
 
 @app.route("/api/total-episodes", methods=["GET"])
@@ -417,11 +517,13 @@ def api_episodes_sequential():
     t1 = time.time()
     conn = get_db_connection()
     episode_ids = [ep["episode_id"] for ep in batch]
-    placeholders = ",".join(["?"] * len(episode_ids))
-    annotation_rows = conn.execute(
-        f"SELECT episode_id, content FROM annotations WHERE episode_id IN ({placeholders})",
-        episode_ids,
-    ).fetchall()
+    annotation_rows = []
+    if episode_ids:
+        placeholders = ",".join(["?"] * len(episode_ids))
+        annotation_rows = conn.execute(
+            f"SELECT episode_id, content FROM annotations WHERE episode_id IN ({placeholders})",
+            episode_ids,
+        ).fetchall()
     timers["db_query"] = time.time() - t1
 
     annotation_status: Dict[str, Dict] = {}
@@ -554,6 +656,235 @@ def api_episodes_sequential():
         resp["debug_fail_reasons"] = fail_reasons[:5]
 
     return jsonify(resp)
+
+
+@app.route("/api/rework/total", methods=["GET"])
+def api_rework_total():
+    conn = get_db_connection()
+    bad_ids = get_legacy_bad_episode_ids(conn)
+    return jsonify({"success": True, "total_episodes": len(bad_ids)})
+
+
+@app.route("/api/rework/episodes", methods=["GET"])
+def api_rework_episodes():
+    """分页加载仍标记为 BAD_FRAMES/BAD_FRAME 的 episode；帧集合 = 历史错帧 ∪ 原抽样帧。"""
+    timer_start = time.time()
+    timers: Dict[str, float] = {}
+
+    limit = request.args.get("limit", default=210, type=int)
+    global_offset = request.args.get("offset", default=0, type=int)
+    user_id = request.args.get("user_id", default="anonymous", type=str)
+
+    t0 = time.time()
+    conn = get_db_connection()
+    bad_ids = get_legacy_bad_episode_ids(conn)
+    id_to_ep = {e["episode_id"]: e for e in scan_factory_episodes()}
+    timers["scan_and_db"] = time.time() - t0
+
+    total_bad = len(bad_ids)
+    if total_bad == 0:
+        return jsonify(
+            {
+                "success": True,
+                "episodes": [],
+                "has_more": False,
+                "next_offset": 0,
+                "total_episodes": 0,
+                "collected_count": 0,
+                "performance": {**timers, "total": time.time() - timer_start},
+            }
+        )
+
+    if global_offset >= total_bad:
+        return jsonify(
+            {
+                "success": False,
+                "message": f"Index {global_offset} 超出范围！待返工共 {total_bad} 条",
+                "total_episodes": total_bad,
+            }
+        ), 400
+
+    end_idx = min(global_offset + max(1, limit), total_bad)
+    batch_ids = bad_ids[global_offset:end_idx]
+    next_offset = end_idx if end_idx < total_bad else 0
+
+    batch = [id_to_ep[i] for i in batch_ids if i in id_to_ep]
+
+    t1 = time.time()
+    ann_rows = []
+    if batch_ids:
+        ph = ",".join(["?"] * len(batch_ids))
+        ann_rows = conn.execute(
+            f"SELECT episode_id, content FROM annotations WHERE episode_id IN ({ph})",
+            batch_ids,
+        ).fetchall()
+    timers["db_query"] = time.time() - t1
+
+    legacy_bad_by_ep: Dict[str, List[int]] = {}
+    rework_prefill: Dict[str, Dict] = {}
+    for ep_id, content in ann_rows:
+        legacy_bad_by_ep[ep_id] = parse_legacy_bad_frame_indices(content)
+        rw = parse_rework_v1_payload(content)
+        if rw:
+            rework_prefill[ep_id] = rw
+
+    fail_reasons: List[str] = []
+
+    def process_rework_episode(ep: Dict) -> Optional[Dict]:
+        try:
+            num_frames = ep["num_frames"]
+            if num_frames == 0:
+                fail_reasons.append(f"0 frames: {ep['episode_id']}")
+                return None
+
+            seq_path = Path(ep["seq_folder"])
+            stage1_done = seq_path.exists() and any(seq_path.glob("tracks_*/model_tracks.npy"))
+            if not stage1_done:
+                return {
+                    "success": True,
+                    "episode_id": ep["episode_id"],
+                    "episode_name": ep["episode_name"],
+                    "dataset_name": ep["dataset_name"],
+                    "episode_index": 0,
+                    "num_frames": num_frames,
+                    "start_idx": 0,
+                    "images": [],
+                    "frame_indices": [],
+                    "stage1_pending": True,
+                    "legacy_bad_frames": legacy_bad_by_ep.get(ep["episode_id"], []),
+                    "rework_annotation": rework_prefill.get(ep["episode_id"]),
+                }
+
+            frame_boxes = load_track_boxes(ep["seq_folder"])
+            legacy_bad = legacy_bad_by_ep.get(ep["episode_id"], [])
+            frame_indices = build_rework_frame_indices(num_frames, frame_boxes, legacy_bad)
+
+            frame_names, frame_offsets = _get_episode_frames(ep)
+            if frame_names is None or len(frame_names) == 0:
+                fail_reasons.append(f"no frame data for {ep['episode_id']}")
+                return None
+
+            images = load_episode_frames_from_shard(
+                ep["shard_path"],
+                frame_names,
+                frame_offsets,
+                frame_indices,
+                frame_boxes,
+            )
+            if not images:
+                fail_reasons.append(f"load_episode_frames returned empty for {ep['episode_id']}")
+                return None
+
+            result: Dict = {
+                "success": True,
+                "episode_id": ep["episode_id"],
+                "episode_name": ep["episode_name"],
+                "dataset_name": ep["dataset_name"],
+                "episode_index": 0,
+                "num_frames": num_frames,
+                "start_idx": 0,
+                "images": images,
+                "frame_indices": frame_indices,
+                "legacy_bad_frames": legacy_bad,
+                "rework_annotation": rework_prefill.get(ep["episode_id"]),
+            }
+            return result
+        except Exception as e:
+            fail_reasons.append(f"exception: {e} for {ep['episode_id']}")
+            return None
+
+    t2 = time.time()
+    results: List[Dict] = []
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(process_rework_episode, ep) for ep in batch]
+        for future in futures:
+            r = future.result()
+            if r is not None:
+                results.append(r)
+    timers["load_and_encode"] = time.time() - t2
+
+    total_time = time.time() - timer_start
+    timers["total"] = total_time
+    timers["other"] = total_time - sum(v for k, v in timers.items() if k not in ("total", "other"))
+
+    missing = [i for i in batch_ids if i not in id_to_ep]
+    for mid in missing[:5]:
+        fail_reasons.append(f"factory 中无此 episode: {mid}")
+
+    print(f"\n{'=' * 60}")
+    print(f"[rework/{user_id[:8]}] offset={global_offset}, limit={limit}, 待返工总数={total_bad}")
+    print(f"  本批请求 id 数: {len(batch_ids)}, 命中 factory: {len(batch)}, 成功加载: {len(results)}")
+    print(f"{'=' * 60}\n")
+
+    resp = {
+        "success": True,
+        "episodes": results,
+        "has_more": next_offset != 0,
+        "next_offset": next_offset,
+        "total_episodes": total_bad,
+        "collected_count": len(results),
+        "performance": timers,
+    }
+    if not results and fail_reasons:
+        resp["debug_fail_reasons"] = fail_reasons[:5]
+    return jsonify(resp)
+
+
+@app.route("/api/rework/submit", methods=["POST"])
+def api_rework_submit():
+    """保存返工三态：REWORK_V1: {\"bad_box\":[], \"not_clear\":[]}"""
+    data = request.get_json(silent=True) or {}
+    items = data.get("episodes", [])
+    if not isinstance(items, list):
+        return jsonify({"success": False, "message": "episodes 须为数组"}), 400
+
+    conn = get_db_connection()
+    now = datetime.utcnow().isoformat()
+
+    for item in items:
+        eid = item.get("episode_id")
+        if not eid:
+            continue
+        episode_name = item.get("episode_name", "")
+        dataset_name = item.get("dataset_name", "")
+        episode_index = item.get("episode_index", None)
+        bad_box = item.get("bad_box") or []
+        not_clear = item.get("not_clear") or []
+        if not isinstance(bad_box, list):
+            bad_box = []
+        if not isinstance(not_clear, list):
+            not_clear = []
+
+        def _norm_ints(seq) -> List[int]:
+            o: List[int] = []
+            for x in seq:
+                try:
+                    o.append(int(x))
+                except (TypeError, ValueError):
+                    continue
+            return o
+
+        bb = sorted(set(_norm_ints(bad_box)))
+        nc = sorted(set(_norm_ints(not_clear)))
+        nc = [i for i in nc if i not in bb]
+        payload = json.dumps({"bad_box": bb, "not_clear": nc}, separators=(",", ":"))
+        content = "REWORK_V1:" + payload
+
+        conn.execute(
+            """
+            INSERT INTO annotations (episode_id, episode_name, dataset_name, episode_index, content, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(episode_id) DO UPDATE SET
+                episode_name = excluded.episode_name,
+                dataset_name = excluded.dataset_name,
+                episode_index = excluded.episode_index,
+                content = excluded.content,
+                updated_at = excluded.updated_at
+            """,
+            (eid, episode_name, dataset_name, episode_index, content, now),
+        )
+    conn.commit()
+    return jsonify({"success": True, "saved": len(items)})
 
 
 @app.route("/api/stats", methods=["GET"])
