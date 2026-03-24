@@ -660,13 +660,20 @@ function updateStats() {
         });
     });
     const markedImages = statBadBox + statNotClear;
-    
-    document.getElementById('totalEpisodes').textContent = totalEpisodes;
-    document.getElementById('totalImages').textContent = totalImages;
-    document.getElementById('statOk').textContent = statOk;
-    document.getElementById('statBadBox').textContent = statBadBox;
-    document.getElementById('statNotClear').textContent = statNotClear;
-    document.getElementById('markedImages').textContent = markedImages;
+
+    const totalEpisodesEl = document.getElementById('totalEpisodes');
+    const totalImagesEl = document.getElementById('totalImages');
+    const statOkEl = document.getElementById('statOk');
+    const statBadBoxEl = document.getElementById('statBadBox');
+    const statNotClearEl = document.getElementById('statNotClear');
+    const markedImagesEl = document.getElementById('markedImages');
+
+    if (totalEpisodesEl) totalEpisodesEl.textContent = totalEpisodes;
+    if (totalImagesEl) totalImagesEl.textContent = totalImages;
+    if (statOkEl) statOkEl.textContent = statOk;
+    if (statBadBoxEl) statBadBoxEl.textContent = statBadBox;
+    if (statNotClearEl) statNotClearEl.textContent = statNotClear;
+    if (markedImagesEl) markedImagesEl.textContent = markedImages;
 }
 
 // 提交审核数据（通用函数）
