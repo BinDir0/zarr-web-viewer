@@ -50,6 +50,7 @@ def merge_annotations(conn: sqlite3.Connection) -> int:
         SELECT
             episode_id, episode_name, dataset_name, episode_index, content, updated_at
         FROM src.annotations
+        WHERE 1
         ON CONFLICT(episode_id) DO UPDATE SET
             episode_name = excluded.episode_name,
             dataset_name = excluded.dataset_name,
@@ -73,6 +74,7 @@ def merge_annotation_reasons(conn: sqlite3.Connection) -> int:
         INSERT INTO main.annotation_reasons (episode_id, content, updated_at)
         SELECT episode_id, content, updated_at
         FROM src.annotation_reasons
+        WHERE 1
         ON CONFLICT(episode_id) DO UPDATE SET
             content = excluded.content,
             updated_at = excluded.updated_at
@@ -92,6 +94,7 @@ def merge_reviewed_episodes(conn: sqlite3.Connection) -> int:
         INSERT INTO main.reviewed_episodes (episode_id, user_id, has_annotation, reviewed_at)
         SELECT episode_id, user_id, has_annotation, reviewed_at
         FROM src.reviewed_episodes
+        WHERE 1
         ON CONFLICT(episode_id) DO UPDATE SET
             user_id = excluded.user_id,
             has_annotation = excluded.has_annotation,
