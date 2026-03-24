@@ -38,6 +38,7 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
             str(Path(__file__).parent / f".factory_episodes_cache_{FACTORY_START}_{FACTORY_END}.json"),
         )
     )
+    SQLITE_BUSY_TIMEOUT_MS = int(config.get("sqlite_busy_timeout_ms", 15000))
 
 DB_PATH = Path(__file__).parent / "annotations.db"
 
@@ -501,10 +502,37 @@ def load_episode_frames_from_raw_buildai(
 def get_db_connection() -> sqlite3.Connection:
     conn = getattr(g, "_db_conn", None)
     if conn is None:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+        conn = create_sqlite_connection(DB_PATH)
         g._db_conn = conn
     return conn
+
+
+def create_sqlite_connection(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=max(1.0, SQLITE_BUSY_TIMEOUT_MS / 1000.0))
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.DatabaseError:
+        # 对只读/外部数据库，WAL 可能不可用；主流程仍可继续。
+        pass
+    return conn
+
+
+def commit_with_retry(conn: sqlite3.Connection, retries: int = 4, base_sleep: float = 0.25) -> None:
+    last_error: Optional[Exception] = None
+    for attempt in range(retries):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            last_error = e
+            if "locked" not in str(e).lower() or attempt == retries - 1:
+                raise
+            time.sleep(base_sleep * (attempt + 1))
+    if last_error is not None:
+        raise last_error
 
 
 @app.teardown_appcontext
@@ -517,7 +545,7 @@ def close_db_connection(_):
 def init_db() -> None:
     """初始化数据库"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = create_sqlite_connection(DB_PATH)
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS annotations (
@@ -584,7 +612,7 @@ def init_db() -> None:
         ]:
             conn.execute(idx_sql)
 
-        conn.commit()
+        commit_with_retry(conn)
     finally:
         conn.close()
 
@@ -691,6 +719,10 @@ def build_annotation_status(content: str, sanity_reason: Optional[Dict] = None) 
         "bad_frames": [],
         "reasoned_annotation": {"bad_box": [], "not_clear": []},
     }
+
+
+def is_factory_dataset_name(dataset_name: Optional[str]) -> bool:
+    return isinstance(dataset_name, str) and dataset_name.startswith("factory")
 
 
 def _fetch_annotation_rows(conn: sqlite3.Connection, where_sql: str) -> List[sqlite3.Row]:
@@ -894,13 +926,20 @@ def api_episodes_sequential():
     t1 = time.time()
     conn = get_db_connection()
     episode_ids = [ep["episode_id"] for ep in batch]
+    dataset_names = sorted({ep.get("dataset_name") for ep in batch if is_factory_dataset_name(ep.get("dataset_name"))})
     annotation_rows = []
     reason_rows = []
-    if episode_ids:
+    if episode_ids and dataset_names:
         placeholders = ",".join(["?"] * len(episode_ids))
+        dataset_placeholders = ",".join(["?"] * len(dataset_names))
         annotation_rows = conn.execute(
-            f"SELECT episode_id, content FROM annotations WHERE episode_id IN ({placeholders})",
-            episode_ids,
+            f"""
+            SELECT episode_id, content
+            FROM annotations
+            WHERE episode_id IN ({placeholders})
+              AND dataset_name IN ({dataset_placeholders})
+            """,
+            episode_ids + dataset_names,
         ).fetchall()
         reason_rows = conn.execute(
             f"SELECT episode_id, content FROM annotation_reasons WHERE episode_id IN ({placeholders})",
@@ -1282,7 +1321,7 @@ def api_rework_submit():
             """,
             (eid, episode_name, dataset_name, episode_index, content, now),
         )
-    conn.commit()
+    commit_with_retry(conn)
     return jsonify({"success": True, "saved": len(items)})
 
 
@@ -1340,7 +1379,7 @@ def api_set_annotation(episode_id: str):
         """,
         (episode_id, episode_name, dataset_name, episode_index, content, datetime.utcnow().isoformat()),
     )
-    conn.commit()
+    commit_with_retry(conn)
     return jsonify({"ok": True})
 
 
@@ -1358,7 +1397,7 @@ def api_start_review():
                 "INSERT OR IGNORE INTO reviewing_episodes (episode_id, user_id, session_id, started_at) VALUES (?, ?, ?, ?)",
                 (episode_id, user_id, session_id, datetime.utcnow().isoformat()),
             )
-        conn.commit()
+        commit_with_retry(conn)
 
         return jsonify({"success": True, "message": f"已标记 {len(episode_ids)} 个 episodes 为审核中", "session_id": session_id})
     except Exception as e:
@@ -1377,7 +1416,7 @@ def api_transfer_review():
 
         conn = get_db_connection()
         conn.execute("UPDATE reviewing_episodes SET session_id = ? WHERE session_id = ?", (new_session_id, old_session_id))
-        conn.commit()
+        commit_with_retry(conn)
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -1395,7 +1434,7 @@ def api_cancel_review():
             conn.execute("DELETE FROM reviewing_episodes WHERE session_id = ?", (session_id,))
         elif user_id:
             conn.execute("DELETE FROM reviewing_episodes WHERE user_id = ?", (user_id,))
-        conn.commit()
+        commit_with_retry(conn)
 
         return jsonify({"success": True, "message": "已取消审核状态"})
     except Exception as e:
@@ -1414,6 +1453,7 @@ def api_sanity_check_submit():
 
         conn = get_db_connection()
         cursor = conn.cursor()
+        skipped_legacy_conflicts: List[str] = []
 
         normalized_episodes = []
         if isinstance(raw_episodes, list) and raw_episodes:
@@ -1478,6 +1518,17 @@ def api_sanity_check_submit():
             bad_frames = episode_info.get("bad_frames", [])
             reasoned = episode_info.get("reasoned_annotation", {"bad_box": [], "not_clear": []})
 
+            if not is_factory_dataset_name(dataset):
+                continue
+
+            existing_row = cursor.execute(
+                "SELECT dataset_name FROM annotations WHERE episode_id = ?",
+                (episode_id,),
+            ).fetchone()
+            if existing_row is not None and not is_factory_dataset_name(existing_row["dataset_name"]):
+                skipped_legacy_conflicts.append(episode_id)
+                continue
+
             if bad_frames:
                 content = "BAD_FRAMES:" + ",".join(map(str, bad_frames))
             else:
@@ -1515,27 +1566,36 @@ def api_sanity_check_submit():
         for episode_info in reviewed_episodes:
             episode_id = episode_info.get("episode_id")
             has_annotation = episode_info.get("has_annotation", False)
+            dataset = episode_info.get("dataset", "")
+            if episode_id in skipped_legacy_conflicts or not is_factory_dataset_name(dataset):
+                continue
             cursor.execute(
                 "INSERT OR REPLACE INTO reviewed_episodes (episode_id, user_id, has_annotation, reviewed_at) VALUES (?, ?, ?, ?)",
                 (episode_id, user_id, has_annotation, datetime.utcnow().isoformat()),
             )
+
+        effective_reviewed_episodes = [
+            ep for ep in reviewed_episodes
+            if is_factory_dataset_name(ep.get("dataset", "")) and ep.get("episode_id") not in skipped_legacy_conflicts
+        ]
 
         if session_id:
             cursor.execute("DELETE FROM reviewing_episodes WHERE session_id = ?", (session_id,))
         else:
             cursor.execute("DELETE FROM reviewing_episodes WHERE user_id = ?", (user_id,))
 
-        conn.commit()
+        commit_with_retry(conn)
 
-        alright_count = len([ep for ep in reviewed_episodes if not ep.get("has_annotation")])
-        bad_count = len([ep for ep in reviewed_episodes if ep.get("has_annotation")])
+        alright_count = len([ep for ep in effective_reviewed_episodes if not ep.get("has_annotation")])
+        bad_count = len([ep for ep in effective_reviewed_episodes if ep.get("has_annotation")])
 
         return jsonify({
             "success": True,
-            "message": f"已提交 {len(reviewed_episodes)} 个标注 ({alright_count} 正常, {bad_count} 有问题)",
-            "total_count": len(reviewed_episodes),
+            "message": f"已提交 {len(effective_reviewed_episodes)} 个标注 ({alright_count} 正常, {bad_count} 有问题)",
+            "total_count": len(effective_reviewed_episodes),
             "alright_count": alright_count,
             "bad_count": bad_count,
+            "skipped_legacy_conflicts": skipped_legacy_conflicts[:20],
         })
 
     except Exception as e:

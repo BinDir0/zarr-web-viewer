@@ -727,6 +727,10 @@ async function submitReviewData() {
     if (!data.success) {
         throw new Error(data.message || '提交失败');
     }
+
+    if (Array.isArray(data.skipped_legacy_conflicts) && data.skipped_legacy_conflicts.length > 0) {
+        console.warn('以下 episode 因 legacy BuildAI 冲突被跳过，未写入 sanity-check 标注:', data.skipped_legacy_conflicts);
+    }
     
     console.log(`已提交 ${data.total_count} 个标注 (${data.alright_count} 正常, ${data.bad_count} 有问题)`);
     
