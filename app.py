@@ -566,11 +566,21 @@ def init_db() -> None:
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS annotation_reasons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                episode_id TEXT NOT NULL UNIQUE,
+                content TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS idx_view_log_episode ON view_log(episode_id)",
             "CREATE INDEX IF NOT EXISTS idx_view_log_user ON view_log(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_reviewing_episode ON reviewing_episodes(episode_id)",
             "CREATE INDEX IF NOT EXISTS idx_reviewed_episode ON reviewed_episodes(episode_id)",
+            "CREATE INDEX IF NOT EXISTS idx_annotation_reasons_episode ON annotation_reasons(episode_id)",
         ]:
             conn.execute(idx_sql)
 
@@ -583,6 +593,7 @@ def init_db() -> None:
 
 REWORK_MAX_FRAMES_PER_EPISODE = 24
 BOX_OUTLINE_WIDTH = 10
+SANITY_REASON_V1_PREFIX = "SANITY_REASON_V1:"
 
 
 def parse_legacy_bad_frame_indices(content: str) -> List[int]:
@@ -607,16 +618,7 @@ def parse_legacy_bad_frame_indices(content: str) -> List[int]:
     return out
 
 
-def parse_rework_v1_payload(content: str) -> Optional[Dict]:
-    """解析返工标注 REWORK_V1:{json}，用于回填 UI。"""
-    if not content or not content.startswith("REWORK_V1:"):
-        return None
-    try:
-        raw = json.loads(content[len("REWORK_V1:") :])
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(raw, dict):
-        return None
+def normalize_reason_payload(bad_box, not_clear) -> Dict[str, List[int]]:
     def _ints(seq) -> List[int]:
         out: List[int] = []
         if not isinstance(seq, list):
@@ -628,7 +630,67 @@ def parse_rework_v1_payload(content: str) -> Optional[Dict]:
                 continue
         return out
 
-    return {"bad_box": _ints(raw.get("bad_box")), "not_clear": _ints(raw.get("not_clear"))}
+    bb = sorted(set(_ints(bad_box)))
+    nc = sorted(set(i for i in _ints(not_clear) if i not in bb))
+    return {"bad_box": bb, "not_clear": nc}
+
+
+def _parse_reason_payload_with_prefix(content: str, prefix: str) -> Optional[Dict]:
+    if not content or not content.startswith(prefix):
+        return None
+    try:
+        raw = json.loads(content[len(prefix) :])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return normalize_reason_payload(raw.get("bad_box"), raw.get("not_clear"))
+
+
+def parse_rework_v1_payload(content: str) -> Optional[Dict]:
+    """解析返工标注 REWORK_V1:{json}，用于回填 UI。"""
+    return _parse_reason_payload_with_prefix(content, "REWORK_V1:")
+
+
+def parse_sanity_reason_payload(content: str) -> Optional[Dict]:
+    """解析 sanity check 的错误原因扩展字段。"""
+    return _parse_reason_payload_with_prefix(content, SANITY_REASON_V1_PREFIX)
+
+
+def build_annotation_status(content: str, sanity_reason: Optional[Dict] = None) -> Dict:
+    rework = parse_rework_v1_payload(content)
+    if rework is not None:
+        bad_frames = sorted(set(rework["bad_box"] + rework["not_clear"]))
+        return {
+            "has_annotation": True,
+            "mark_type": "bad" if bad_frames else "alright",
+            "bad_frames": bad_frames,
+            "reasoned_annotation": rework,
+        }
+
+    if content.startswith("BAD_FRAMES:") or content.startswith("BAD_FRAME:"):
+        bad_frames = sorted(set(parse_legacy_bad_frame_indices(content)))
+        if sanity_reason is None:
+            reasoned = {"bad_box": list(bad_frames), "not_clear": []}
+        else:
+            bb = [i for i in sanity_reason["bad_box"] if i in bad_frames]
+            nc = [i for i in sanity_reason["not_clear"] if i in bad_frames and i not in bb]
+            assigned = set(bb) | set(nc)
+            missing = [i for i in bad_frames if i not in assigned]
+            reasoned = {"bad_box": sorted(set(bb + missing)), "not_clear": nc}
+        return {
+            "has_annotation": True,
+            "mark_type": "bad" if bad_frames else "alright",
+            "bad_frames": bad_frames,
+            "reasoned_annotation": reasoned,
+        }
+
+    return {
+        "has_annotation": True,
+        "mark_type": "alright",
+        "bad_frames": [],
+        "reasoned_annotation": {"bad_box": [], "not_clear": []},
+    }
 
 
 def _fetch_annotation_rows(conn: sqlite3.Connection, where_sql: str) -> List[sqlite3.Row]:
@@ -833,23 +895,29 @@ def api_episodes_sequential():
     conn = get_db_connection()
     episode_ids = [ep["episode_id"] for ep in batch]
     annotation_rows = []
+    reason_rows = []
     if episode_ids:
         placeholders = ",".join(["?"] * len(episode_ids))
         annotation_rows = conn.execute(
             f"SELECT episode_id, content FROM annotations WHERE episode_id IN ({placeholders})",
             episode_ids,
         ).fetchall()
+        reason_rows = conn.execute(
+            f"SELECT episode_id, content FROM annotation_reasons WHERE episode_id IN ({placeholders})",
+            episode_ids,
+        ).fetchall()
     timers["db_query"] = time.time() - t1
+
+    sanity_reason_by_id: Dict[str, Dict] = {}
+    for row in reason_rows:
+        parsed = parse_sanity_reason_payload(row[1])
+        if parsed is not None:
+            sanity_reason_by_id[row[0]] = parsed
 
     annotation_status: Dict[str, Dict] = {}
     for row in annotation_rows:
         ep_id, content = row[0], row[1]
-        if content.startswith("BAD_FRAMES:") or content.startswith("BAD_FRAME:"):
-            bad_str = content.replace("BAD_FRAMES:", "").replace("BAD_FRAME:", "")
-            bad_frames = [int(x) for x in bad_str.split(",") if x.strip()]
-            annotation_status[ep_id] = {"has_annotation": True, "mark_type": "bad", "bad_frames": bad_frames}
-        else:
-            annotation_status[ep_id] = {"has_annotation": True, "mark_type": "alright", "bad_frames": []}
+        annotation_status[ep_id] = build_annotation_status(content, sanity_reason_by_id.get(ep_id))
 
     fail_reasons = []
 
@@ -1195,25 +1263,9 @@ def api_rework_submit():
         episode_name = item.get("episode_name", "")
         dataset_name = item.get("dataset_name", "")
         episode_index = item.get("episode_index", None)
-        bad_box = item.get("bad_box") or []
-        not_clear = item.get("not_clear") or []
-        if not isinstance(bad_box, list):
-            bad_box = []
-        if not isinstance(not_clear, list):
-            not_clear = []
-
-        def _norm_ints(seq) -> List[int]:
-            o: List[int] = []
-            for x in seq:
-                try:
-                    o.append(int(x))
-                except (TypeError, ValueError):
-                    continue
-            return o
-
-        bb = sorted(set(_norm_ints(bad_box)))
-        nc = sorted(set(_norm_ints(not_clear)))
-        nc = [i for i in nc if i not in bb]
+        reasoned = normalize_reason_payload(item.get("bad_box"), item.get("not_clear"))
+        bb = reasoned["bad_box"]
+        nc = reasoned["not_clear"]
         payload = json.dumps({"bad_box": bb, "not_clear": nc}, separators=(",", ":"))
         content = "REWORK_V1:" + payload
 
@@ -1355,7 +1407,7 @@ def api_sanity_check_submit():
     """提交 sanity check 标注结果"""
     try:
         data = request.json
-        marked_frames = data.get("marked_frames", [])
+        raw_episodes = data.get("episodes", [])
         reviewed_episodes = data.get("reviewed_episodes", [])
         user_id = data.get("user_id", "anonymous")
         session_id = data.get("session_id")
@@ -1363,13 +1415,68 @@ def api_sanity_check_submit():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        for episode_info in reviewed_episodes:
+        normalized_episodes = []
+        if isinstance(raw_episodes, list) and raw_episodes:
+            for episode_info in raw_episodes:
+                episode_id = episode_info.get("episode_id")
+                if not episode_id:
+                    continue
+                reasoned = normalize_reason_payload(episode_info.get("bad_box"), episode_info.get("not_clear"))
+                bad_frames = sorted(set(reasoned["bad_box"] + reasoned["not_clear"]))
+                normalized_episodes.append({
+                    "episode_id": episode_id,
+                    "dataset": episode_info.get("dataset_name", episode_info.get("dataset", "")),
+                    "episode_name": episode_info.get("episode_name", ""),
+                    "episode_index": episode_info.get("episode_index"),
+                    "bad_frames": bad_frames,
+                    "reasoned_annotation": reasoned,
+                })
+        else:
+            marked_frames = data.get("marked_frames", [])
+            marked_by_episode: Dict[str, List[int]] = {}
+            for frame in marked_frames:
+                episode_id = frame.get("episode_id")
+                if not episode_id:
+                    continue
+                try:
+                    frame_index = int(frame.get("frame_index"))
+                except (TypeError, ValueError):
+                    continue
+                marked_by_episode.setdefault(episode_id, []).append(frame_index)
+
+            for episode_info in reviewed_episodes:
+                episode_id = episode_info.get("episode_id")
+                if not episode_id:
+                    continue
+                bad_frames = sorted(set(marked_by_episode.get(episode_id, [])))
+                normalized_episodes.append({
+                    "episode_id": episode_id,
+                    "dataset": episode_info.get("dataset", ""),
+                    "episode_name": episode_info.get("episode_name", ""),
+                    "episode_index": episode_info.get("episode_index"),
+                    "bad_frames": bad_frames,
+                    "reasoned_annotation": {"bad_box": list(bad_frames), "not_clear": []},
+                })
+
+        if not isinstance(reviewed_episodes, list) or not reviewed_episodes:
+            reviewed_episodes = [
+                {
+                    "episode_id": item["episode_id"],
+                    "dataset": item["dataset"],
+                    "episode_name": item["episode_name"],
+                    "episode_index": item["episode_index"],
+                    "has_annotation": bool(item["bad_frames"]),
+                }
+                for item in normalized_episodes
+            ]
+
+        for episode_info in normalized_episodes:
             episode_id = episode_info.get("episode_id")
             dataset = episode_info.get("dataset")
             episode_name = episode_info.get("episode_name")
             episode_index = episode_info.get("episode_index")
-
-            bad_frames = [f.get("frame_index") for f in marked_frames if f.get("episode_id") == episode_id]
+            bad_frames = episode_info.get("bad_frames", [])
+            reasoned = episode_info.get("reasoned_annotation", {"bad_box": [], "not_clear": []})
 
             if bad_frames:
                 content = "BAD_FRAMES:" + ",".join(map(str, bad_frames))
@@ -1389,6 +1496,21 @@ def api_sanity_check_submit():
                 """,
                 (episode_id, episode_name, dataset, episode_index, content, datetime.utcnow().isoformat()),
             )
+
+            if bad_frames:
+                reason_content = SANITY_REASON_V1_PREFIX + json.dumps(reasoned, separators=(",", ":"))
+                cursor.execute(
+                    """
+                    INSERT INTO annotation_reasons (episode_id, content, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(episode_id) DO UPDATE SET
+                        content = excluded.content,
+                        updated_at = excluded.updated_at
+                    """,
+                    (episode_id, reason_content, datetime.utcnow().isoformat()),
+                )
+            else:
+                cursor.execute("DELETE FROM annotation_reasons WHERE episode_id = ?", (episode_id,))
 
         for episode_info in reviewed_episodes:
             episode_id = episode_info.get("episode_id")

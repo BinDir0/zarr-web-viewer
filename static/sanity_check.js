@@ -1,14 +1,68 @@
 // 全局状态
 let episodes = [];
-let markedFrames = new Set(); // 存储标记的帧 ID: "episodeId_frameIndex"
 let sessionId = null; // 当前审核会话 ID
 let reviewedEpisodeIds = new Set(); // 记录所有加载的 episode IDs
 let currentOffset = 0; // 当前起始位置
+const FRAME_STATE_SEP = '\u0001';
+const LABELS = {
+    ok: '',
+    bad_box: 'A · 手部可见，标注框错误',
+    not_clear: 'B · 手部不清晰'
+};
+let frameStates = new Map(); // 仅存储非 ok 帧
 
 // 预加载相关
 let preloadedBatch = null; // 预加载的下一批数据
 let isPreloading = false; // 是否正在预加载
 let preloadAbortController = null; // 用于取消预加载请求
+
+function frameKey(episodeId, relativeFrameIndex) {
+    return episodeId + FRAME_STATE_SEP + String(relativeFrameIndex);
+}
+
+function getState(episodeId, relativeFrameIndex) {
+    return frameStates.get(frameKey(episodeId, relativeFrameIndex)) || 'ok';
+}
+
+function setFrameState(episodeId, relativeFrameIndex, state) {
+    const key = frameKey(episodeId, relativeFrameIndex);
+    if (state === 'ok') {
+        frameStates.delete(key);
+    } else {
+        frameStates.set(key, state);
+    }
+}
+
+function nextState(state) {
+    if (state === 'ok') return 'bad_box';
+    if (state === 'bad_box') return 'not_clear';
+    return 'ok';
+}
+
+function applyStateToElement(element, state) {
+    element.classList.remove('state-ok', 'state-bad_box', 'state-not_clear');
+    element.classList.add('state-' + state);
+    element.dataset.frameState = state;
+    const label = element.querySelector('.frame-mask-label');
+    if (label) {
+        label.textContent = LABELS[state] || '';
+    }
+}
+
+function initialStateFromAnnotation(annotation, relativeFrameIndex) {
+    if (!annotation || !annotation.has_annotation) {
+        return 'ok';
+    }
+    const reasoned = annotation.reasoned_annotation || null;
+    const badBox = reasoned && Array.isArray(reasoned.bad_box) ? reasoned.bad_box : [];
+    const notClear = reasoned && Array.isArray(reasoned.not_clear) ? reasoned.not_clear : [];
+    if (badBox.includes(relativeFrameIndex)) return 'bad_box';
+    if (notClear.includes(relativeFrameIndex)) return 'not_clear';
+    if (Array.isArray(annotation.bad_frames) && annotation.bad_frames.includes(relativeFrameIndex)) {
+        return 'bad_box';
+    }
+    return 'ok';
+}
 
 // 生成或获取用户 ID
 function getUserId() {
@@ -176,7 +230,7 @@ async function loadEpisodes(clearMarks = true) {
     const container = document.getElementById('episodesContainer');
     
     if (clearMarks) {
-        markedFrames.clear();
+        frameStates.clear();
         reviewedEpisodeIds.clear();
     }
     
@@ -495,7 +549,10 @@ function renderEpisode(episode, data) {
                 statusLabel.innerHTML = '✓ 已标注：Alright';
             } else if (markType === 'bad') {
                 const badCount = data.annotation.bad_frames ? data.annotation.bad_frames.length : 0;
-                statusLabel.innerHTML = `✗ 已标注：Bad Frame (${badCount}个问题帧)`;
+                const reasoned = data.annotation.reasoned_annotation || { bad_box: [], not_clear: [] };
+                const badBoxCount = Array.isArray(reasoned.bad_box) ? reasoned.bad_box.length : 0;
+                const notClearCount = Array.isArray(reasoned.not_clear) ? reasoned.not_clear.length : 0;
+                statusLabel.innerHTML = `✗ 已标注：Bad Frame (${badCount}个问题帧，A ${badBoxCount} / B ${notClearCount})`;
             }
             
             episodeBlock.appendChild(statusLabel);
@@ -536,27 +593,9 @@ function renderEpisode(episode, data) {
             const absoluteFrameIndex = data.frame_indices[idx] || idx;
             const startIdx = data.start_idx || 0;
             const relativeFrameIndex = absoluteFrameIndex - startIdx;  // 相对于episode开头的帧号
-            
-            const frameId = `${episode.id}_${relativeFrameIndex}`;
-            frameWrapper.dataset.frameId = frameId;
+            frameWrapper.dataset.episodeId = episode.id;
+            frameWrapper.dataset.relativeFrameIndex = String(relativeFrameIndex);
             frameWrapper.dataset.absoluteIndex = absoluteFrameIndex;  // 保存绝对索引用于其他用途
-            
-            // 检查是否已标注（来自之前的标注）
-            if (data.annotation && data.annotation.mark_type === 'bad' && data.annotation.bad_frames) {
-                // 检查该帧是否在 bad_frames 列表中
-                if (data.annotation.bad_frames.includes(relativeFrameIndex)) {
-                    markedFrames.add(frameId);
-                    frameWrapper.classList.add('marked');
-                }
-            }
-            
-            // 检查是否在当前会话中标注
-            if (markedFrames.has(frameId)) {
-                frameWrapper.classList.add('marked');
-            }
-            
-            // 点击切换标注状态
-            frameWrapper.onclick = () => toggleMark(frameId, frameWrapper);
             
             const frameIndexLabel = document.createElement('div');
             frameIndexLabel.className = 'frame-index';
@@ -565,9 +604,28 @@ function renderEpisode(episode, data) {
             const imgElement = document.createElement('img');
             imgElement.src = img;  // 已经包含 data URL 前缀
             imgElement.alt = `Frame ${idx}`;
+
+            const mask = document.createElement('div');
+            mask.className = 'frame-mask';
+            const maskLabel = document.createElement('div');
+            maskLabel.className = 'frame-mask-label';
+            mask.appendChild(maskLabel);
             
             frameWrapper.appendChild(frameIndexLabel);
             frameWrapper.appendChild(imgElement);
+            frameWrapper.appendChild(mask);
+
+            const initialState = initialStateFromAnnotation(data.annotation, relativeFrameIndex);
+            setFrameState(episode.id, relativeFrameIndex, initialState);
+            applyStateToElement(frameWrapper, initialState);
+
+            frameWrapper.onclick = () => {
+                const next = nextState(getState(episode.id, relativeFrameIndex));
+                setFrameState(episode.id, relativeFrameIndex, next);
+                applyStateToElement(frameWrapper, next);
+                updateStats();
+            };
+
             framesContainer.appendChild(frameWrapper);
         });
         
@@ -580,63 +638,68 @@ function renderEpisode(episode, data) {
     }
 }
 
-// 切换标注状态
-function toggleMark(frameId, element) {
-    if (markedFrames.has(frameId)) {
-        markedFrames.delete(frameId);
-        element.classList.remove('marked');
-    } else {
-        markedFrames.add(frameId);
-        element.classList.add('marked');
-    }
-    
-    updateStats();
-}
-
 // 更新统计信息
 function updateStats() {
     const totalEpisodes = episodes.length;
-    const totalImages = document.querySelectorAll('.frame-wrapper').length;
-    const markedImages = markedFrames.size;
+    let totalImages = 0;
+    let statOk = 0;
+    let statBadBox = 0;
+    let statNotClear = 0;
+
+    episodes.forEach((episode) => {
+        if (!Array.isArray(episode.frame_indices)) {
+            return;
+        }
+        totalImages += episode.frame_indices.length;
+        episode.frame_indices.forEach((absoluteFrameIndex) => {
+            const relativeFrameIndex = absoluteFrameIndex - (episode.start_idx || 0);
+            const state = getState(episode.id, relativeFrameIndex);
+            if (state === 'bad_box') statBadBox++;
+            else if (state === 'not_clear') statNotClear++;
+            else statOk++;
+        });
+    });
+    const markedImages = statBadBox + statNotClear;
     
     document.getElementById('totalEpisodes').textContent = totalEpisodes;
     document.getElementById('totalImages').textContent = totalImages;
+    document.getElementById('statOk').textContent = statOk;
+    document.getElementById('statBadBox').textContent = statBadBox;
+    document.getElementById('statNotClear').textContent = statNotClear;
     document.getElementById('markedImages').textContent = markedImages;
 }
 
 // 提交审核数据（通用函数）
 async function submitReviewData() {
-    // 准备标注数据（有问题的帧）
-    const markedFramesData = Array.from(markedFrames).map(frameId => {
-        const lastUnderscore = frameId.lastIndexOf('_');
-        const episodeId = frameId.substring(0, lastUnderscore);
-        const frameIndex = frameId.substring(lastUnderscore + 1);
-        const episode = episodes.find(e => e.id === episodeId);
+    const payloadEpisodes = episodes.map((episode) => {
+        const badBox = [];
+        const notClear = [];
+        if (Array.isArray(episode.frame_indices)) {
+            episode.frame_indices.forEach((absoluteFrameIndex) => {
+                const relativeFrameIndex = absoluteFrameIndex - (episode.start_idx || 0);
+                const state = getState(episode.id, relativeFrameIndex);
+                if (state === 'bad_box') badBox.push(relativeFrameIndex);
+                else if (state === 'not_clear') notClear.push(relativeFrameIndex);
+            });
+        }
 
         return {
-            episode_id: episodeId,
-            dataset: episode ? episode.dataset : '',
-            episode_name: episode ? episode.name : '',
-            episode_index: episode ? episode.episode_index : 0,
-            frame_index: parseInt(frameIndex)
+            episode_id: episode.id,
+            dataset_name: episode.dataset,
+            episode_name: episode.name,
+            episode_index: episode.episode_index,
+            bad_box: badBox,
+            not_clear: notClear
         };
     });
-    
-        // 准备已审核的 episodes 列表（所有加载的 episodes）
-        const reviewedEpisodesData = episodes.map(episode => {
-            // 检查该 episode 是否有标注
-            const hasAnnotation = Array.from(markedFrames).some(frameId => 
-                frameId.startsWith(episode.id + '_')
-            );
-            
-            return {
-                episode_id: episode.id,
-                dataset: episode.dataset,
-                episode_name: episode.name,
-                episode_index: episode.episode_index,
-                has_annotation: hasAnnotation
-            };
-        });
+
+    const reviewedEpisodesData = payloadEpisodes.map((episode) => ({
+        episode_id: episode.episode_id,
+        dataset: episode.dataset_name,
+        episode_name: episode.episode_name,
+        episode_index: episode.episode_index,
+        has_annotation: episode.bad_box.length + episode.not_clear.length > 0
+    }));
     
     // 提交到服务器
     const response = await fetch('/api/sanity-check/submit', {
@@ -645,7 +708,7 @@ async function submitReviewData() {
             'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-            marked_frames: markedFramesData,
+            episodes: payloadEpisodes,
             reviewed_episodes: reviewedEpisodesData,
             user_id: getUserId(),
             session_id: sessionId
@@ -785,4 +848,3 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log('页面可见性变化:', document.hidden ? '隐藏' : '显示');
     });
 });
-

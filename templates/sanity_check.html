@@ -210,6 +210,12 @@
             border-radius: 8px;
             overflow: hidden;
             background: #1a1a1a;
+            border: 2px solid transparent;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+
+        .frame-wrapper:hover {
+            border-color: rgba(255, 255, 255, 0.12);
         }
 
         .frame-wrapper img {
@@ -223,29 +229,50 @@
             transform: scale(1.02);
         }
 
-        .frame-wrapper.marked::after {
-            content: '';
+        .frame-mask {
             position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(220, 53, 69, 0.5);
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+            text-align: center;
+            z-index: 2;
             pointer-events: none;
         }
 
-        .frame-wrapper.marked::before {
-            content: '✗';
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            font-size: 48px;
-            color: white;
-            font-weight: bold;
-            z-index: 1;
-            pointer-events: none;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+        .frame-mask-label {
+            font-size: 13px;
+            font-weight: 700;
+            line-height: 1.35;
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+            padding: 8px 10px;
+            border-radius: 6px;
+            max-width: 95%;
+        }
+
+        .frame-wrapper.state-ok .frame-mask {
+            display: none;
+        }
+
+        .frame-wrapper.state-bad_box .frame-mask {
+            background: rgba(180, 75, 30, 0.58);
+        }
+
+        .frame-wrapper.state-bad_box .frame-mask-label {
+            color: #fff7f0;
+            background: rgba(120, 45, 12, 0.55);
+            border: 1px solid rgba(255, 200, 160, 0.35);
+        }
+
+        .frame-wrapper.state-not_clear .frame-mask {
+            background: rgba(75, 50, 130, 0.55);
+        }
+
+        .frame-wrapper.state-not_clear .frame-mask-label {
+            color: #f3ecff;
+            background: rgba(55, 35, 95, 0.55);
+            border: 1px solid rgba(200, 170, 255, 0.35);
         }
 
         .frame-index {
@@ -290,6 +317,24 @@
 
         .summary .stat.marked .value {
             color: #dc3545;
+        }
+
+        .summary .stat.ok .value {
+            color: #4CAF50;
+        }
+
+        .summary .stat.bad-a .value {
+            color: #ff9f5a;
+        }
+
+        .summary .stat.bad-b .value {
+            color: #b89cff;
+        }
+
+        .interaction-hint {
+            color: #9aa4b2;
+            font-size: 13px;
+            text-align: center;
         }
 
         /* 响应式设计：小屏幕时调整列数 */
@@ -338,6 +383,9 @@
         <button class="btn danger" id="submitExitBtn" onclick="submitAndExit()" disabled>
             提交并退出
         </button>
+        <div class="interaction-hint">
+            单击 = A（手部可见，标注框错误）；双击 = B（手部不清晰）；三击或不点 = 正确
+        </div>
     </div>
 
     <div class="summary">
@@ -350,13 +398,24 @@
             <span>总图片数:</span>
             <span class="value" id="totalImages">0</span>
         </div>
+        <div class="stat ok">
+            <span>正确:</span>
+            <span class="value" id="statOk">0</span>
+        </div>
+        <div class="stat bad-a">
+            <span>A 错误:</span>
+            <span class="value" id="statBadBox">0</span>
+        </div>
+        <div class="stat bad-b">
+            <span>B 错误:</span>
+            <span class="value" id="statNotClear">0</span>
+        </div>
         <div class="stat marked">
-            <span>错误:</span>
+            <span>错误总数:</span>
             <span class="value" id="markedImages">0</span>
         </div>
     </div>
 
-    <script src="/static/sanity_check.js?v=11"></script>
+    <script src="/static/sanity_check.js?v=12"></script>
 </body>
 </html>
-
