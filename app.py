@@ -868,7 +868,7 @@ def build_rework_frame_indices(
 
 @app.route("/")
 def index():
-    return redirect("/rework")
+    return render_template("sanity_check.html")
 
 
 @app.route("/sanity-check")
