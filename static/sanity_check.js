@@ -8,7 +8,8 @@ const FRAME_STATE_SEP = '\u0001';
 const LABELS = {
     ok: '',
     missing_annotation: 'A · 双手清晰可见，但缺少标注',
-    wrong_annotation: 'B · 错误标注'
+    non_visible_wrong_annotation: 'B · 非双手可见且框标错',
+    visible_box_wrong_annotation: 'C · 双手可见但框标错'
 };
 
 const frameStates = new Map();
@@ -27,7 +28,8 @@ function getUserId() {
 
 function nextState(state) {
     if (state === 'ok') return 'missing_annotation';
-    if (state === 'missing_annotation') return 'wrong_annotation';
+    if (state === 'missing_annotation') return 'non_visible_wrong_annotation';
+    if (state === 'non_visible_wrong_annotation') return 'visible_box_wrong_annotation';
     return 'ok';
 }
 
@@ -48,7 +50,12 @@ function setState(key, state) {
 }
 
 function applyStateToElement(element, state) {
-    element.classList.remove('state-ok', 'state-missing_annotation', 'state-wrong_annotation');
+    element.classList.remove(
+        'state-ok',
+        'state-missing_annotation',
+        'state-non_visible_wrong_annotation',
+        'state-visible_box_wrong_annotation'
+    );
     element.classList.add('state-' + state);
     element.dataset.frameState = state;
     const label = element.querySelector('.frame-mask-label');
@@ -70,16 +77,20 @@ function initialEpisodeFrameState(annotation, relativeFrameIndex) {
         return 'ok';
     }
     const reasoned = annotation.reasoned_annotation || null;
-    const wrongAnnotation = reasoned && Array.isArray(reasoned.wrong_annotation)
-        ? reasoned.wrong_annotation
-        : (reasoned && Array.isArray(reasoned.bad_box) ? reasoned.bad_box : []);
     const missingAnnotation = reasoned && Array.isArray(reasoned.missing_annotation)
         ? reasoned.missing_annotation
         : (reasoned && Array.isArray(reasoned.not_clear) ? reasoned.not_clear : []);
+    const nonVisibleWrongAnnotation = reasoned && Array.isArray(reasoned.non_visible_wrong_annotation)
+        ? reasoned.non_visible_wrong_annotation
+        : [];
+    const visibleBoxWrongAnnotation = reasoned && Array.isArray(reasoned.visible_box_wrong_annotation)
+        ? reasoned.visible_box_wrong_annotation
+        : (reasoned && Array.isArray(reasoned.wrong_annotation) ? reasoned.wrong_annotation : (reasoned && Array.isArray(reasoned.bad_box) ? reasoned.bad_box : []));
     if (missingAnnotation.includes(relativeFrameIndex)) return 'missing_annotation';
-    if (wrongAnnotation.includes(relativeFrameIndex)) return 'wrong_annotation';
+    if (nonVisibleWrongAnnotation.includes(relativeFrameIndex)) return 'non_visible_wrong_annotation';
+    if (visibleBoxWrongAnnotation.includes(relativeFrameIndex)) return 'visible_box_wrong_annotation';
     if (Array.isArray(annotation.bad_frames) && annotation.bad_frames.includes(relativeFrameIndex)) {
-        return 'wrong_annotation';
+        return 'visible_box_wrong_annotation';
     }
     return 'ok';
 }
@@ -120,14 +131,16 @@ function updateQueueModeMeta(mode, totalItems, itemLabel) {
 function updateStats() {
     let totalFrames = 0;
     let missingAnnotation = 0;
-    let wrongAnnotation = 0;
+    let nonVisibleWrongAnnotation = 0;
+    let visibleBoxWrongAnnotation = 0;
 
     if (queueMode === 'frame') {
         queueItems.forEach((item) => {
             totalFrames += 1;
             const state = getState(frameStateKey(item.episode_id, item.frame_index));
             if (state === 'missing_annotation') missingAnnotation += 1;
-            else if (state === 'wrong_annotation') wrongAnnotation += 1;
+            else if (state === 'non_visible_wrong_annotation') nonVisibleWrongAnnotation += 1;
+            else if (state === 'visible_box_wrong_annotation') visibleBoxWrongAnnotation += 1;
         });
     } else {
         queueItems.forEach((episode) => {
@@ -139,16 +152,20 @@ function updateStats() {
                 const relativeFrameIndex = absoluteFrameIndex - (episode.start_idx || 0);
                 const state = getState(frameStateKey(episode.id, relativeFrameIndex));
                 if (state === 'missing_annotation') missingAnnotation += 1;
-                else if (state === 'wrong_annotation') wrongAnnotation += 1;
+                else if (state === 'non_visible_wrong_annotation') nonVisibleWrongAnnotation += 1;
+                else if (state === 'visible_box_wrong_annotation') visibleBoxWrongAnnotation += 1;
             });
         });
     }
 
-    const okCount = Math.max(0, totalFrames - missingAnnotation - wrongAnnotation);
+    const okCount = Math.max(
+        0,
+        totalFrames - missingAnnotation - nonVisibleWrongAnnotation - visibleBoxWrongAnnotation
+    );
     const label = queueMode === 'frame' ? 'frames' : 'episodes';
     const loadedCount = document.getElementById('loadedCount');
     if (loadedCount) {
-        loadedCount.textContent = `已加载 ${queueItems.length} / ${totalItemCount || '?'} 个${label} | 正确 ${okCount} | A ${missingAnnotation} | B ${wrongAnnotation}`;
+        loadedCount.textContent = `已加载 ${queueItems.length} / ${totalItemCount || '?'} 个${label} | 正确 ${okCount} | A ${missingAnnotation} | B ${nonVisibleWrongAnnotation} | C ${visibleBoxWrongAnnotation}`;
     }
 }
 
@@ -300,14 +317,21 @@ function renderEpisodeCard(episode) {
         if (markType === 'alright') {
             statusLabel.textContent = '已标注：Alright';
         } else {
-            const reasoned = data.annotation.reasoned_annotation || { wrong_annotation: [], missing_annotation: [] };
-            const wrongCount = Array.isArray(reasoned.wrong_annotation)
-                ? reasoned.wrong_annotation.length
-                : (Array.isArray(reasoned.bad_box) ? reasoned.bad_box.length : 0);
+            const reasoned = data.annotation.reasoned_annotation || {
+                missing_annotation: [],
+                non_visible_wrong_annotation: [],
+                visible_box_wrong_annotation: []
+            };
             const missingCount = Array.isArray(reasoned.missing_annotation)
                 ? reasoned.missing_annotation.length
                 : (Array.isArray(reasoned.not_clear) ? reasoned.not_clear.length : 0);
-            statusLabel.textContent = `已标注：问题帧 (A ${missingCount} / B ${wrongCount})`;
+            const nonVisibleWrongCount = Array.isArray(reasoned.non_visible_wrong_annotation)
+                ? reasoned.non_visible_wrong_annotation.length
+                : 0;
+            const visibleBoxWrongCount = Array.isArray(reasoned.visible_box_wrong_annotation)
+                ? reasoned.visible_box_wrong_annotation.length
+                : (Array.isArray(reasoned.wrong_annotation) ? reasoned.wrong_annotation.length : (Array.isArray(reasoned.bad_box) ? reasoned.bad_box.length : 0));
+            statusLabel.textContent = `已标注：问题帧 (A ${missingCount} / B ${nonVisibleWrongCount} / C ${visibleBoxWrongCount})`;
         }
         episodeBlock.appendChild(statusLabel);
     }
@@ -480,12 +504,14 @@ async function submitReviewData() {
     } else {
         const episodes = queueItems.map((episode) => {
             const missingAnnotation = [];
-            const wrongAnnotation = [];
+            const nonVisibleWrongAnnotation = [];
+            const visibleBoxWrongAnnotation = [];
             (episode.frame_indices || []).forEach((absoluteFrameIndex) => {
                 const relativeFrameIndex = absoluteFrameIndex - (episode.start_idx || 0);
                 const state = getState(frameStateKey(episode.id, relativeFrameIndex));
                 if (state === 'missing_annotation') missingAnnotation.push(relativeFrameIndex);
-                else if (state === 'wrong_annotation') wrongAnnotation.push(relativeFrameIndex);
+                else if (state === 'non_visible_wrong_annotation') nonVisibleWrongAnnotation.push(relativeFrameIndex);
+                else if (state === 'visible_box_wrong_annotation') visibleBoxWrongAnnotation.push(relativeFrameIndex);
             });
             return {
                 episode_id: episode.id,
@@ -493,7 +519,8 @@ async function submitReviewData() {
                 episode_name: episode.name,
                 episode_index: episode.episode_index,
                 missing_annotation: missingAnnotation,
-                wrong_annotation: wrongAnnotation
+                non_visible_wrong_annotation: nonVisibleWrongAnnotation,
+                visible_box_wrong_annotation: visibleBoxWrongAnnotation
             };
         });
         payload = {
@@ -504,7 +531,11 @@ async function submitReviewData() {
                 dataset: episode.dataset_name,
                 episode_name: episode.episode_name,
                 episode_index: episode.episode_index,
-                has_annotation: episode.missing_annotation.length + episode.wrong_annotation.length > 0
+                has_annotation:
+                    episode.missing_annotation.length
+                    + episode.non_visible_wrong_annotation.length
+                    + episode.visible_box_wrong_annotation.length
+                    > 0
             })),
             user_id: getUserId(),
             session_id: sessionId

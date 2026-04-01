@@ -318,11 +318,21 @@
             border: 1px solid rgba(255, 200, 160, 0.35);
         }
 
-        .frame-wrapper.state-wrong_annotation .frame-mask {
+        .frame-wrapper.state-non_visible_wrong_annotation .frame-mask {
+            background: rgba(75, 50, 130, 0.55);
+        }
+
+        .frame-wrapper.state-non_visible_wrong_annotation .frame-mask-label {
+            color: #f3ecff;
+            background: rgba(55, 35, 95, 0.55);
+            border: 1px solid rgba(200, 170, 255, 0.35);
+        }
+
+        .frame-wrapper.state-visible_box_wrong_annotation .frame-mask {
             background: rgba(145, 42, 42, 0.55);
         }
 
-        .frame-wrapper.state-wrong_annotation .frame-mask-label {
+        .frame-wrapper.state-visible_box_wrong_annotation .frame-mask-label {
             color: #fff2f2;
             background: rgba(110, 28, 28, 0.55);
             border: 1px solid rgba(255, 170, 170, 0.35);
@@ -407,10 +417,10 @@
             提交并退出
         </button>
         <div class="interaction-hint">
-            单击 = A（双手清晰可见，但缺少标注）；双击 = B（错误标注）；三击或不点 = 正确
+            单击 = A（双手可见但缺少标注）；双击 = B（非双手可见且框标错）；三击 = C（双手可见但框标错）；四击或不点 = 正确
         </div>
     </div>
 
-    <script src="/static/sanity_check.js?v=15"></script>
+    <script src="/static/sanity_check.js?v=16"></script>
 </body>
 </html>
