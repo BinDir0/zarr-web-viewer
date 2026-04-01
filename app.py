@@ -42,6 +42,8 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     SANITY_RESULTS_MAX_FRAMES_PER_EPISODE = int(config.get("sanity_results_max_frames_per_episode", 8))
     SANITY_RESULTS_PROGRESS_INTERVAL_SEC = float(config.get("sanity_results_progress_interval_sec", 1.5))
     SANITY_RESULTS_FRAME_MAX_WIDTH = int(config.get("sanity_results_frame_max_width", 360))
+    SANITY_RESULTS_SAMPLE_EVERY_N = max(1, int(config.get("sanity_results_sample_every_n", 30)))
+    SANITY_RESULTS_SAMPLE_SEED = str(config.get("sanity_results_sample_seed", "sanity-results-fixed-v1"))
     sanity_results_cache_dir = config.get("sanity_results_cache_dir", "/DATA/guantianrui/zarr-web-viewer-cache")
     SANITY_RESULTS_CACHE_DIR = Path(str(sanity_results_cache_dir))
     FACTORY_EPISODES_CACHE_FILE = Path(
@@ -77,7 +79,7 @@ _SANITY_RESULTS_EPISODES: Optional[List[Dict]] = None
 _SANITY_RESULTS_INDEX: Optional[Dict[str, Any]] = None
 _SANITY_RESULTS_SIGNATURE: Optional[tuple] = None
 EPISODE_CACHE_VERSION = 1
-SANITY_RESULTS_INDEX_CACHE_VERSION = 1
+SANITY_RESULTS_INDEX_CACHE_VERSION = 2
 SANITY_RESULTS_RENDER_CACHE_VERSION = 1
 _FACTORY_SCAN_LOCK = Lock()
 _SANITY_RESULTS_LOCK = Lock()
@@ -323,6 +325,13 @@ def _normalized_boxes_from_result_item(item: Dict) -> List[Dict]:
     return out
 
 
+def _should_keep_result_frame(frame_id: str) -> bool:
+    if SANITY_RESULTS_SAMPLE_EVERY_N <= 1:
+        return True
+    digest = hashlib.sha1(f"{SANITY_RESULTS_SAMPLE_SEED}:{frame_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % SANITY_RESULTS_SAMPLE_EVERY_N == 0
+
+
 def scan_sanity_results_index(force_rescan: bool = False) -> Dict[str, Any]:
     global _SANITY_RESULTS_EPISODES, _SANITY_RESULTS_INDEX, _SANITY_RESULTS_SIGNATURE
     empty = {"frames": [], "episodes": [], "episodes_by_id": {}}
@@ -359,13 +368,14 @@ def scan_sanity_results_index(force_rescan: bool = False) -> Dict[str, Any]:
                     _SANITY_RESULTS_SIGNATURE = signature
                     print(
                         "✓ 从磁盘缓存加载 sanity results 索引: "
-                        f"{len(_SANITY_RESULTS_INDEX.get('frames', []))} 帧, "
+                        f"{len(_SANITY_RESULTS_INDEX.get('frames', []))} sampled 帧, "
                         f"{len(_SANITY_RESULTS_EPISODES)} 个 episodes"
                     )
                     return _SANITY_RESULTS_INDEX
 
         episodes_by_video: Dict[str, Dict[str, Any]] = {}
         frames: List[Dict[str, Any]] = []
+        total_candidate_frames = 0
         total_lines = 0
         total_bytes = sum(path.stat().st_size for path in files if path.exists())
         processed_bytes = 0
@@ -410,6 +420,11 @@ def scan_sanity_results_index(force_rescan: bool = False) -> Dict[str, Any]:
                         except (TypeError, ValueError):
                             frame_index = 0
 
+                        frame_id = f"{video_key}\u0001{frame_index}"
+                        total_candidate_frames += 1
+                        if not _should_keep_result_frame(frame_id):
+                            continue
+
                         dataset_name = _guess_dataset_name_from_tar_path(tar_path)
                         ep = episodes_by_video.setdefault(
                             video_key,
@@ -418,17 +433,17 @@ def scan_sanity_results_index(force_rescan: bool = False) -> Dict[str, Any]:
                                 "episode_name": video_key,
                                 "dataset_name": dataset_name,
                                 "num_frames": 0,
-                                "result_frame_count": 0,
-                                "result_frame_indices": [],
+                                "sampled_result_frame_count": 0,
+                                "sampled_result_frame_indices": [],
                             },
                         )
                         ep["num_frames"] = max(ep["num_frames"], frame_index + 1)
-                        ep["result_frame_count"] += 1
-                        ep["result_frame_indices"].append(frame_index)
+                        ep["sampled_result_frame_count"] += 1
+                        ep["sampled_result_frame_indices"].append(frame_index)
 
                         frames.append(
                             {
-                                "frame_id": f"{video_key}\u0001{frame_index}",
+                                "frame_id": frame_id,
                                 "episode_id": video_key,
                                 "episode_name": video_key,
                                 "dataset_name": dataset_name,
@@ -457,22 +472,27 @@ def scan_sanity_results_index(force_rescan: bool = False) -> Dict[str, Any]:
         episodes_by_id: Dict[str, Dict[str, Any]] = {}
         for idx, raw_ep in enumerate(sorted(episodes_by_video.values(), key=lambda x: x["episode_id"])):
             ep = dict(raw_ep)
-            ep["result_frame_indices"] = sorted(set(ep["result_frame_indices"]))
+            ep["sampled_result_frame_indices"] = sorted(set(ep["sampled_result_frame_indices"]))
             ep["episode_index"] = idx
             episodes.append(ep)
             episodes_by_id[ep["episode_id"]] = ep
 
-        for frame in frames:
+        for queue_index, frame in enumerate(frames):
             ep = episodes_by_id.get(frame["episode_id"])
             if ep is None:
                 continue
+            frame["queue_index"] = queue_index
             frame["episode_index"] = ep["episode_index"]
-            frame["episode_frame_count"] = ep["result_frame_count"]
+            frame["episode_frame_count"] = ep["sampled_result_frame_count"]
 
         index = {
             "frames": frames,
             "episodes": episodes,
             "episodes_by_id": episodes_by_id,
+            "total_candidate_frames": total_candidate_frames,
+            "sampled_frame_count": len(frames),
+            "sample_every_n": SANITY_RESULTS_SAMPLE_EVERY_N,
+            "sample_seed": SANITY_RESULTS_SAMPLE_SEED,
         }
         _save_pickle_cache(
             cache_file,
@@ -487,7 +507,8 @@ def scan_sanity_results_index(force_rescan: bool = False) -> Dict[str, Any]:
         _SANITY_RESULTS_EPISODES = episodes
         _SANITY_RESULTS_SIGNATURE = signature
         print(
-            f"✓ 加载 sanity results.jsonl: {len(files)} 个文件, {len(frames)} 帧, "
+            f"✓ 加载 sanity results.jsonl: {len(files)} 个文件, "
+            f"{len(frames)}/{total_candidate_frames} sampled 帧 (1/{SANITY_RESULTS_SAMPLE_EVERY_N}), "
             f"{len(episodes)} 个 episodes"
         )
         return index
@@ -1573,7 +1594,7 @@ def _finalize_results_episode_annotations(
         if not is_factory_dataset_name(dataset_name):
             continue
 
-        valid_frame_indices = {int(x) for x in ep.get("result_frame_indices", [])}
+        valid_frame_indices = {int(x) for x in ep.get("sampled_result_frame_indices", [])}
         expected_count = len(valid_frame_indices)
         if expected_count <= 0:
             continue
