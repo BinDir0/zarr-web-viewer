@@ -710,17 +710,42 @@ def load_episode_frames_from_results(
     for tar_path, entries in grouped.items():
         try:
             with tarfile.open(tar_path, "r") as tar:
+                members = tar.getmembers()
+                members_by_name = {member.name: member for member in members}
+                members_by_basename: Dict[str, List] = {}
+                for member in members:
+                    base = os.path.basename(member.name)
+                    members_by_basename.setdefault(base, []).append(member)
+
+                def resolve_member(member_name: str):
+                    direct = members_by_name.get(member_name)
+                    if direct is not None:
+                        return direct
+                    prefixed = members_by_name.get(f"./{member_name}")
+                    if prefixed is not None:
+                        return prefixed
+                    basename_matches = members_by_basename.get(os.path.basename(member_name), [])
+                    if len(basename_matches) == 1:
+                        return basename_matches[0]
+                    for member in members:
+                        if member.name.endswith(member_name):
+                            return member
+                    return None
+
                 for entry in entries:
-                    try:
-                        member = tar.getmember(entry["member_name"])
-                    except KeyError:
+                    member = resolve_member(entry["member_name"])
+                    if member is None:
+                        print(
+                            f"⚠ tar 中未找到成员 ({os.path.basename(tar_path)} :: {entry['member_name']})",
+                            flush=True,
+                        )
                         continue
                     extracted = tar.extractfile(member)
                     if extracted is None:
                         continue
                     frame_data[entry["idx"]] = extracted.read()
         except Exception as e:
-            print(f"⚠ 读取 results tar 失败 ({tar_path}): {e}")
+            print(f"⚠ 读取 results tar 失败 ({tar_path}): {e}", flush=True)
 
     results = []
     for idx, entry in enumerate(frame_entries):
@@ -761,7 +786,7 @@ def load_episode_frames_from_results(
                 img.save(buf, format="JPEG", quality=75)
                 results.append(f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}")
         except Exception as e:
-            print(f"⚠ 解码 results 帧失败 ({entry.get('member_name')}): {e}")
+            print(f"⚠ 解码 results 帧失败 ({entry.get('member_name')}): {e}", flush=True)
 
     return results
 
