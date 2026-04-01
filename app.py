@@ -1,4 +1,5 @@
 import base64
+import glob
 import io
 import json
 import os
@@ -32,6 +33,11 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     LEGACY_BUILDAI_ANNOTATIONS_DB = Path(legacy_buildai_annotations_db) if legacy_buildai_annotations_db else None
     source_factory_annotations_db = config.get("source_factory_annotations_db")
     SOURCE_FACTORY_ANNOTATIONS_DB = Path(source_factory_annotations_db) if source_factory_annotations_db else None
+    sanity_results_globs = config.get("sanity_results_globs", [])
+    if isinstance(sanity_results_globs, str):
+        sanity_results_globs = [sanity_results_globs]
+    SANITY_RESULTS_GLOBS = [str(x) for x in sanity_results_globs if str(x).strip()]
+    SANITY_RESULTS_MAX_FRAMES_PER_EPISODE = int(config.get("sanity_results_max_frames_per_episode", 8))
     FACTORY_EPISODES_CACHE_FILE = Path(
         config.get(
             "factory_episode_cache_file",
@@ -61,8 +67,11 @@ except ImportError:
 _ALL_EPISODES: Optional[List[Dict]] = None
 _FACTORY_EPISODE_LOOKUP: Optional[Dict[str, Dict]] = None
 _FACTORY_INDEXES: Dict[int, dict] = {}  # fid -> parsed index JSON, loaded on demand
+_SANITY_RESULTS_EPISODES: Optional[List[Dict]] = None
+_SANITY_RESULTS_SIGNATURE: Optional[tuple] = None
 EPISODE_CACHE_VERSION = 1
 _FACTORY_SCAN_LOCK = Lock()
+_SANITY_RESULTS_LOCK = Lock()
 _BAD_SOURCE_ROWS_CACHE: Dict[str, Dict] = {}
 _BAD_SOURCE_ROWS_LOCK = Lock()
 _TRACKS_PATH_CACHE: Dict[str, Optional[str]] = {}
@@ -106,6 +115,181 @@ def _save_episode_cache(cache_file: Path, cache_key: Dict, episodes: List[Dict])
         print(f"✓ 已写入 episode 缓存: {cache_file}")
     except OSError as e:
         print(f"⚠ 写入 episode 缓存失败 ({cache_file}): {e}")
+
+
+def _expand_result_files(patterns: List[str]) -> List[Path]:
+    files = set()
+    for pattern in patterns:
+        for path in glob.glob(pattern):
+            p = Path(path)
+            if p.is_file():
+                files.add(p.resolve())
+    return sorted(files)
+
+
+def _get_paths_signature(paths: List[Path]) -> tuple:
+    signature = []
+    for path in paths:
+        try:
+            st = path.stat()
+            signature.append((str(path), st.st_mtime_ns, st.st_size))
+        except OSError:
+            signature.append((str(path), None, None))
+    return tuple(signature)
+
+
+def _guess_dataset_name_from_tar_path(tar_path: str) -> str:
+    parent = Path(tar_path).parent.name
+    if parent.startswith("factory"):
+        return parent
+    match = re.search(r"/(factory\d{3})/", tar_path)
+    if match:
+        return match.group(1)
+    return "results_jsonl"
+
+
+def _pick_evenly_spaced_result_frames(entries: List[Dict], max_frames: int) -> List[Dict]:
+    if max_frames <= 0 or len(entries) <= max_frames:
+        return list(entries)
+    if max_frames == 1:
+        return [entries[len(entries) // 2]]
+    out: List[Dict] = []
+    last_idx = len(entries) - 1
+    for i in range(max_frames):
+        idx = round(i * last_idx / (max_frames - 1))
+        out.append(entries[idx])
+    return out
+
+
+def _result_item_is_bad(item: Dict) -> bool:
+    try:
+        if int(item.get("is_bad", 0)) != 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(item.get("label", 0)) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalized_boxes_from_result_item(item: Dict) -> List[Dict]:
+    detections = item.get("detections")
+    if isinstance(detections, list) and detections:
+        out = []
+        for det in detections:
+            if not isinstance(det, dict):
+                continue
+            box = det.get("box_cxcywh")
+            if not isinstance(box, list) or len(box) != 4:
+                continue
+            try:
+                cx, cy, w, h = [float(x) for x in box]
+                score = float(det.get("score", 0.0))
+                side_label = int(det.get("side_label", 0))
+            except (TypeError, ValueError):
+                continue
+            out.append({"cx": cx, "cy": cy, "w": w, "h": h, "score": score, "side_label": side_label})
+        if out:
+            return out
+
+    boxes = item.get("boxes")
+    scores = item.get("scores")
+    side_labels = item.get("side_labels")
+    out = []
+    if isinstance(boxes, list):
+        for idx, box in enumerate(boxes):
+            if not isinstance(box, list) or len(box) != 4:
+                continue
+            try:
+                cx, cy, w, h = [float(x) for x in box]
+                score = float(scores[idx]) if isinstance(scores, list) and idx < len(scores) else 0.0
+                side_label = int(side_labels[idx]) if isinstance(side_labels, list) and idx < len(side_labels) else 0
+            except (TypeError, ValueError):
+                continue
+            out.append({"cx": cx, "cy": cy, "w": w, "h": h, "score": score, "side_label": side_label})
+    return out
+
+
+def scan_sanity_result_episodes(force_rescan: bool = False) -> List[Dict]:
+    global _SANITY_RESULTS_EPISODES, _SANITY_RESULTS_SIGNATURE
+    if not SANITY_RESULTS_GLOBS:
+        return []
+
+    files = _expand_result_files(SANITY_RESULTS_GLOBS)
+    signature = _get_paths_signature(files)
+    if _SANITY_RESULTS_EPISODES is not None and _SANITY_RESULTS_SIGNATURE == signature and not force_rescan:
+        return _SANITY_RESULTS_EPISODES
+
+    with _SANITY_RESULTS_LOCK:
+        if _SANITY_RESULTS_EPISODES is not None and _SANITY_RESULTS_SIGNATURE == signature and not force_rescan:
+            return _SANITY_RESULTS_EPISODES
+
+        if not files:
+            _SANITY_RESULTS_EPISODES = []
+            _SANITY_RESULTS_SIGNATURE = signature
+            print("⚠ 未匹配到 sanity results.jsonl 文件，回退旧 sanity 数据源")
+            return []
+
+        episodes_by_video: Dict[str, Dict] = {}
+        total_lines = 0
+        for path in files:
+            try:
+                with path.open("r") as f:
+                    for line in f:
+                        total_lines += 1
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            item = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        video_key = str(item.get("video_key", "")).strip()
+                        member_name = str(item.get("member_name", "")).strip()
+                        tar_path = str(item.get("tar_path", "")).strip()
+                        if not video_key or not member_name or not tar_path:
+                            continue
+
+                        try:
+                            frame_index = int(item.get("frame_index", 0))
+                        except (TypeError, ValueError):
+                            frame_index = 0
+
+                        ep = episodes_by_video.setdefault(video_key, {
+                            "episode_id": video_key,
+                            "episode_name": video_key,
+                            "dataset_name": _guess_dataset_name_from_tar_path(tar_path),
+                            "num_frames": 0,
+                            "sampled_frames": [],
+                        })
+                        ep["num_frames"] = max(ep["num_frames"], frame_index + 1)
+                        ep["sampled_frames"].append({
+                            "tar_path": tar_path,
+                            "member_name": member_name,
+                            "frame_index": frame_index,
+                            "normalized_boxes": _normalized_boxes_from_result_item(item),
+                            "is_bad": _result_item_is_bad(item),
+                            "prob_is_bad": item.get("prob_is_bad"),
+                        })
+            except OSError as e:
+                print(f"⚠ 读取 results.jsonl 失败 ({path}): {e}")
+
+        episodes = []
+        for idx, ep in enumerate(sorted(episodes_by_video.values(), key=lambda x: x["episode_id"])):
+            frames = sorted(ep["sampled_frames"], key=lambda x: x["frame_index"])
+            ep["sampled_frames"] = _pick_evenly_spaced_result_frames(frames, SANITY_RESULTS_MAX_FRAMES_PER_EPISODE)
+            ep["episode_index"] = idx
+            episodes.append(ep)
+
+        _SANITY_RESULTS_EPISODES = episodes
+        _SANITY_RESULTS_SIGNATURE = signature
+        print(
+            f"✓ 加载 sanity results.jsonl: {len(files)} 个文件, {total_lines} 行, "
+            f"{len(episodes)} 个 episodes"
+        )
+        return episodes
 
 
 def _count_jpg_files(dir_path: Path) -> int:
@@ -447,6 +631,77 @@ def load_episode_frames_from_shard(
 
         except Exception as e:
             print(f"⚠ 解码帧失败 (shard={os.path.basename(shard_path)}, frame={frame_idx}): {e}")
+
+    return results
+
+
+def load_episode_frames_from_results(
+    frame_entries: List[Dict],
+    max_width: int = 640,
+) -> List[str]:
+    """从 results.jsonl 提供的 tar_path/member_name 直接加载采样帧并绘制检测框。"""
+    import tarfile
+
+    frame_data: Dict[int, bytes] = {}
+    grouped: Dict[str, List[Dict]] = {}
+    for idx, entry in enumerate(frame_entries):
+        grouped.setdefault(entry["tar_path"], []).append({"idx": idx, **entry})
+
+    for tar_path, entries in grouped.items():
+        try:
+            with tarfile.open(tar_path, "r") as tar:
+                for entry in entries:
+                    try:
+                        member = tar.getmember(entry["member_name"])
+                    except KeyError:
+                        continue
+                    extracted = tar.extractfile(member)
+                    if extracted is None:
+                        continue
+                    frame_data[entry["idx"]] = extracted.read()
+        except Exception as e:
+            print(f"⚠ 读取 results tar 失败 ({tar_path}): {e}")
+
+    results = []
+    for idx, entry in enumerate(frame_entries):
+        raw = frame_data.get(idx)
+        if raw is None:
+            continue
+        try:
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            w, h = img.size
+            for box in entry.get("normalized_boxes", []):
+                cx = float(box["cx"]) * w
+                cy = float(box["cy"]) * h
+                bw = float(box["w"]) * w
+                bh = float(box["h"]) * h
+                x1 = cx - bw / 2.0
+                y1 = cy - bh / 2.0
+                x2 = cx + bw / 2.0
+                y2 = cy + bh / 2.0
+                score = float(box.get("score", 0.0))
+                handedness = int(box.get("side_label", 0))
+                if handedness == 0:
+                    color, label = "#00BFFF", f"L {score:.2f}"
+                else:
+                    color, label = "#FF4444", f"R {score:.2f}"
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=BOX_OUTLINE_WIDTH)
+                draw.text((x1 + 2, max(0, y1 - 16)), label, fill=color)
+
+            if w > max_width:
+                img = img.resize((max_width, int(h * max_width / w)), Image.Resampling.BILINEAR)
+
+            buf = io.BytesIO()
+            try:
+                img.save(buf, format="WEBP", quality=80, method=4)
+                results.append(f"data:image/webp;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}")
+            except Exception:
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=75)
+                results.append(f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}")
+        except Exception as e:
+            print(f"⚠ 解码 results 帧失败 ({entry.get('member_name')}): {e}")
 
     return results
 
@@ -885,11 +1140,15 @@ def rework_check():
 @app.route("/api/total-episodes", methods=["GET"])
 def api_total_episodes():
     """获取总 episode 数"""
-    episodes = scan_factory_episodes()
+    episodes = scan_sanity_result_episodes() or scan_factory_episodes()
+    dataset_counts: Dict[str, int] = {}
+    for ep in episodes:
+        dataset_name = ep.get("dataset_name", "unknown")
+        dataset_counts[dataset_name] = dataset_counts.get(dataset_name, 0) + 1
     return jsonify({
         "success": True,
         "total_episodes": len(episodes),
-        "datasets": [{"name": f"factory{FACTORY_START:03d}-{FACTORY_END:03d}", "count": len(episodes)}],
+        "datasets": [{"name": name, "count": count} for name, count in sorted(dataset_counts.items())],
     })
 
 
@@ -905,7 +1164,7 @@ def api_episodes_sequential():
 
     # 扫描 episodes
     t0 = time.time()
-    all_episodes = scan_factory_episodes()
+    all_episodes = scan_sanity_result_episodes() or scan_factory_episodes()
     timers["scan_episodes"] = time.time() - t0
 
     total_episodes = len(all_episodes)
@@ -963,6 +1222,33 @@ def api_episodes_sequential():
     def process_episode(ep: Dict) -> Optional[Dict]:
         """加载单个 episode 的帧并编码"""
         try:
+            sampled_frames = ep.get("sampled_frames")
+            if isinstance(sampled_frames, list):
+                if not sampled_frames:
+                    fail_reasons.append(f"no sampled frames: {ep['episode_id']}")
+                    return None
+
+                frame_indices = [int(item["frame_index"]) for item in sampled_frames]
+                images = load_episode_frames_from_results(sampled_frames)
+                if not images:
+                    fail_reasons.append(f"load results frames returned empty for {ep['episode_id']}")
+                    return None
+
+                result = {
+                    "success": True,
+                    "episode_id": ep["episode_id"],
+                    "episode_name": ep["episode_name"],
+                    "dataset_name": ep["dataset_name"],
+                    "episode_index": ep.get("episode_index", 0),
+                    "num_frames": ep.get("num_frames", len(frame_indices)),
+                    "start_idx": 0,
+                    "images": images,
+                    "frame_indices": frame_indices,
+                }
+                if ep["episode_id"] in annotation_status:
+                    result["annotation"] = annotation_status[ep["episode_id"]]
+                return result
+
             num_frames = ep["num_frames"]
             if num_frames == 0:
                 fail_reasons.append(f"0 frames: {ep['episode_id']}")
@@ -1607,8 +1893,11 @@ def main():
     init_db()
     should_preload = (not USE_RELOADER) or (os.environ.get("WERKZEUG_RUN_MAIN") == "true")
     if should_preload:
-        # 启动时只预热 factory episode 缓存；旧 BuildAI 在 rework 请求里按 episode_id 直接解析。
-        scan_factory_episodes()
+        # sanity-check 若配置了 results.jsonl，则优先预热该缓存；否则走原 factory 缓存。
+        if scan_sanity_result_episodes():
+            print("✓ 已预热 sanity results.jsonl 缓存")
+        else:
+            scan_factory_episodes()
     else:
         print("跳过 reloader 父进程中的 factory 预热，等待实际服务进程启动")
     print(f"启动服务器在端口 {SERVER_PORT}")
