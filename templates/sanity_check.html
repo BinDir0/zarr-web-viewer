@@ -108,6 +108,10 @@
             box-sizing: border-box;
         }
 
+        .episodes-grid.frame-mode {
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+        }
+
         .episode-block {
             background: #2a2a2a;
             border-radius: 8px;
@@ -144,6 +148,44 @@
             font-size: 11px;
             color: #888;
             white-space: nowrap;
+        }
+
+        .frame-card {
+            background: #2a2a2a;
+            border-radius: 8px;
+            padding: 10px;
+        }
+
+        .frame-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .frame-card-title {
+            font-size: 12px;
+            font-weight: 700;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .frame-card-meta {
+            font-size: 11px;
+            color: #8c96a3;
+            white-space: nowrap;
+        }
+
+        .frame-card-footer {
+            margin-top: 8px;
+            font-size: 11px;
+            color: #8c96a3;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .annotation-status {
@@ -287,50 +329,6 @@
             z-index: 2;
         }
 
-        .summary {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: #2a2a2a;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            min-width: 200px;
-        }
-
-        .summary h3 {
-            margin-bottom: 10px;
-            font-size: 16px;
-        }
-
-        .summary .stat {
-            display: flex;
-            justify-content: space-between;
-            margin: 8px 0;
-            font-size: 14px;
-        }
-
-        .summary .stat .value {
-            font-weight: bold;
-            color: #007bff;
-        }
-
-        .summary .stat.marked .value {
-            color: #dc3545;
-        }
-
-        .summary .stat.ok .value {
-            color: #4CAF50;
-        }
-
-        .summary .stat.bad-a .value {
-            color: #ff9f5a;
-        }
-
-        .summary .stat.bad-b .value {
-            color: #b89cff;
-        }
-
         .interaction-hint {
             color: #9aa4b2;
             font-size: 13px;
@@ -338,15 +336,29 @@
         }
 
         /* 响应式设计：小屏幕时调整列数 */
+        @media (max-width: 1700px) {
+            .episodes-grid.frame-mode {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+            }
+        }
+
         @media (max-width: 1200px) {
             .episodes-grid {
                 grid-template-columns: repeat(2, 1fr);
+            }
+
+            .episodes-grid.frame-mode {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
             }
         }
         
         @media (max-width: 800px) {
             .episodes-grid {
                 grid-template-columns: 1fr;
+            }
+
+            .episodes-grid.frame-mode {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
             }
         }
     </style>
@@ -369,7 +381,7 @@
 
     <div class="controls">
         <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px;">
-            <label for="startOffset" style="font-weight: bold;">起始位置：</label>
+            <label for="startOffset" id="startOffsetLabel" style="font-weight: bold;">起始位置：</label>
             <input type="number" id="startOffset" min="0" step="1" 
                    placeholder="输入起始episode编号（例如: 0, 1000, 5000）"
                    style="padding: 8px; border-radius: 4px; border: 1px solid #555; background: #333; color: #fff; width: 300px;">
@@ -388,6 +400,6 @@
         </div>
     </div>
 
-    <script src="/static/sanity_check.js?v=13"></script>
+    <script src="/static/sanity_check.js?v=14"></script>
 </body>
 </html>

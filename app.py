@@ -1,8 +1,10 @@
 import base64
 import glob
+import hashlib
 import io
 import json
 import os
+import pickle
 import re
 import sqlite3
 import time
@@ -10,7 +12,7 @@ from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import yaml
@@ -39,6 +41,9 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     SANITY_RESULTS_GLOBS = [str(x) for x in sanity_results_globs if str(x).strip()]
     SANITY_RESULTS_MAX_FRAMES_PER_EPISODE = int(config.get("sanity_results_max_frames_per_episode", 8))
     SANITY_RESULTS_PROGRESS_INTERVAL_SEC = float(config.get("sanity_results_progress_interval_sec", 1.5))
+    SANITY_RESULTS_FRAME_MAX_WIDTH = int(config.get("sanity_results_frame_max_width", 360))
+    sanity_results_cache_dir = config.get("sanity_results_cache_dir", "/DATA/guantianrui/zarr-web-viewer-cache")
+    SANITY_RESULTS_CACHE_DIR = Path(str(sanity_results_cache_dir))
     FACTORY_EPISODES_CACHE_FILE = Path(
         config.get(
             "factory_episode_cache_file",
@@ -69,14 +74,21 @@ _ALL_EPISODES: Optional[List[Dict]] = None
 _FACTORY_EPISODE_LOOKUP: Optional[Dict[str, Dict]] = None
 _FACTORY_INDEXES: Dict[int, dict] = {}  # fid -> parsed index JSON, loaded on demand
 _SANITY_RESULTS_EPISODES: Optional[List[Dict]] = None
+_SANITY_RESULTS_INDEX: Optional[Dict[str, Any]] = None
 _SANITY_RESULTS_SIGNATURE: Optional[tuple] = None
 EPISODE_CACHE_VERSION = 1
+SANITY_RESULTS_INDEX_CACHE_VERSION = 1
+SANITY_RESULTS_RENDER_CACHE_VERSION = 1
 _FACTORY_SCAN_LOCK = Lock()
 _SANITY_RESULTS_LOCK = Lock()
 _BAD_SOURCE_ROWS_CACHE: Dict[str, Dict] = {}
 _BAD_SOURCE_ROWS_LOCK = Lock()
 _TRACKS_PATH_CACHE: Dict[str, Optional[str]] = {}
 _TRACKS_PATH_LOCK = Lock()
+_SANITY_RESULTS_CACHE_ROOT: Optional[Path] = None
+_SANITY_RESULTS_CACHE_ROOT_LOCK = Lock()
+_RESULTS_TAR_INDEX_CACHE: Dict[str, Dict[str, Any]] = {}
+_RESULTS_TAR_INDEX_LOCK = Lock()
 
 
 def _load_episode_cache(cache_file: Path, cache_key: Dict) -> Optional[List[Dict]]:
@@ -116,6 +128,74 @@ def _save_episode_cache(cache_file: Path, cache_key: Dict, episodes: List[Dict])
         print(f"✓ 已写入 episode 缓存: {cache_file}")
     except OSError as e:
         print(f"⚠ 写入 episode 缓存失败 ({cache_file}): {e}")
+
+
+def _get_sanity_results_cache_root() -> Path:
+    global _SANITY_RESULTS_CACHE_ROOT
+    if _SANITY_RESULTS_CACHE_ROOT is not None:
+        return _SANITY_RESULTS_CACHE_ROOT
+
+    with _SANITY_RESULTS_CACHE_ROOT_LOCK:
+        if _SANITY_RESULTS_CACHE_ROOT is not None:
+            return _SANITY_RESULTS_CACHE_ROOT
+
+        candidates = [
+            SANITY_RESULTS_CACHE_DIR,
+            Path(__file__).parent / ".cache",
+            Path("/tmp/zarr-web-viewer-cache"),
+        ]
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                _SANITY_RESULTS_CACHE_ROOT = candidate
+                print(f"✓ sanity results 缓存目录: {_SANITY_RESULTS_CACHE_ROOT}")
+                return _SANITY_RESULTS_CACHE_ROOT
+            except OSError:
+                continue
+
+        _SANITY_RESULTS_CACHE_ROOT = Path(__file__).parent
+        return _SANITY_RESULTS_CACHE_ROOT
+
+
+def _get_sanity_results_index_cache_file() -> Path:
+    return _get_sanity_results_cache_root() / "sanity_results_index.pkl"
+
+
+def _get_sanity_results_render_cache_dir() -> Path:
+    path = _get_sanity_results_cache_root() / "rendered_results_frames"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _get_sanity_results_tar_index_cache_dir() -> Path:
+    path = _get_sanity_results_cache_root() / "tar_member_offsets"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _hash_json_payload(payload: Dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()
+
+
+def _load_pickle_cache(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as f:
+            return pickle.load(f)
+    except (OSError, pickle.PickleError, EOFError, AttributeError, ValueError) as e:
+        print(f"⚠ 读取缓存失败 ({path}): {e}")
+        return None
+
+
+def _save_pickle_cache(path: Path, payload: Dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except OSError as e:
+        print(f"⚠ 写入缓存失败 ({path}): {e}")
 
 
 def _expand_result_files(patterns: List[str]) -> List[Path]:
@@ -243,27 +323,49 @@ def _normalized_boxes_from_result_item(item: Dict) -> List[Dict]:
     return out
 
 
-def scan_sanity_result_episodes(force_rescan: bool = False) -> List[Dict]:
-    global _SANITY_RESULTS_EPISODES, _SANITY_RESULTS_SIGNATURE
+def scan_sanity_results_index(force_rescan: bool = False) -> Dict[str, Any]:
+    global _SANITY_RESULTS_EPISODES, _SANITY_RESULTS_INDEX, _SANITY_RESULTS_SIGNATURE
+    empty = {"frames": [], "episodes": [], "episodes_by_id": {}}
     if not SANITY_RESULTS_GLOBS:
-        return []
+        return empty
 
     files = _expand_result_files(SANITY_RESULTS_GLOBS)
     signature = _get_paths_signature(files)
-    if _SANITY_RESULTS_EPISODES is not None and _SANITY_RESULTS_SIGNATURE == signature and not force_rescan:
-        return _SANITY_RESULTS_EPISODES
+    if _SANITY_RESULTS_INDEX is not None and _SANITY_RESULTS_SIGNATURE == signature and not force_rescan:
+        return _SANITY_RESULTS_INDEX
 
     with _SANITY_RESULTS_LOCK:
-        if _SANITY_RESULTS_EPISODES is not None and _SANITY_RESULTS_SIGNATURE == signature and not force_rescan:
-            return _SANITY_RESULTS_EPISODES
+        if _SANITY_RESULTS_INDEX is not None and _SANITY_RESULTS_SIGNATURE == signature and not force_rescan:
+            return _SANITY_RESULTS_INDEX
 
         if not files:
             _SANITY_RESULTS_EPISODES = []
+            _SANITY_RESULTS_INDEX = empty
             _SANITY_RESULTS_SIGNATURE = signature
             print("⚠ 未匹配到 sanity results.jsonl 文件，回退旧 sanity 数据源")
-            return []
+            return empty
 
-        episodes_by_video: Dict[str, Dict] = {}
+        cache_file = _get_sanity_results_index_cache_file()
+        if not force_rescan:
+            cached = _load_pickle_cache(cache_file)
+            if isinstance(cached, dict):
+                if (
+                    cached.get("version") == SANITY_RESULTS_INDEX_CACHE_VERSION
+                    and cached.get("signature") == signature
+                    and isinstance(cached.get("index"), dict)
+                ):
+                    _SANITY_RESULTS_INDEX = cached["index"]
+                    _SANITY_RESULTS_EPISODES = _SANITY_RESULTS_INDEX.get("episodes", [])
+                    _SANITY_RESULTS_SIGNATURE = signature
+                    print(
+                        "✓ 从磁盘缓存加载 sanity results 索引: "
+                        f"{len(_SANITY_RESULTS_INDEX.get('frames', []))} 帧, "
+                        f"{len(_SANITY_RESULTS_EPISODES)} 个 episodes"
+                    )
+                    return _SANITY_RESULTS_INDEX
+
+        episodes_by_video: Dict[str, Dict[str, Any]] = {}
+        frames: List[Dict[str, Any]] = []
         total_lines = 0
         total_bytes = sum(path.stat().st_size for path in files if path.exists())
         processed_bytes = 0
@@ -308,22 +410,37 @@ def scan_sanity_result_episodes(force_rescan: bool = False) -> List[Dict]:
                         except (TypeError, ValueError):
                             frame_index = 0
 
-                        ep = episodes_by_video.setdefault(video_key, {
-                            "episode_id": video_key,
-                            "episode_name": video_key,
-                            "dataset_name": _guess_dataset_name_from_tar_path(tar_path),
-                            "num_frames": 0,
-                            "sampled_frames": [],
-                        })
+                        dataset_name = _guess_dataset_name_from_tar_path(tar_path)
+                        ep = episodes_by_video.setdefault(
+                            video_key,
+                            {
+                                "episode_id": video_key,
+                                "episode_name": video_key,
+                                "dataset_name": dataset_name,
+                                "num_frames": 0,
+                                "result_frame_count": 0,
+                                "result_frame_indices": [],
+                            },
+                        )
                         ep["num_frames"] = max(ep["num_frames"], frame_index + 1)
-                        ep["sampled_frames"].append({
-                            "tar_path": tar_path,
-                            "member_name": member_name,
-                            "frame_index": frame_index,
-                            "normalized_boxes": _normalized_boxes_from_result_item(item),
-                            "is_bad": _result_item_is_bad(item),
-                            "prob_is_bad": item.get("prob_is_bad"),
-                        })
+                        ep["result_frame_count"] += 1
+                        ep["result_frame_indices"].append(frame_index)
+
+                        frames.append(
+                            {
+                                "frame_id": f"{video_key}\u0001{frame_index}",
+                                "episode_id": video_key,
+                                "episode_name": video_key,
+                                "dataset_name": dataset_name,
+                                "frame_index": frame_index,
+                                "tar_path": tar_path,
+                                "member_name": member_name,
+                                "normalized_boxes": _normalized_boxes_from_result_item(item),
+                                "prob_is_bad": item.get("prob_is_bad"),
+                                "is_bad": _result_item_is_bad(item),
+                                "queue_index": len(frames),
+                            }
+                        )
                 _print_sanity_results_progress(
                     processed_bytes=processed_bytes,
                     total_bytes=total_bytes,
@@ -336,20 +453,48 @@ def scan_sanity_result_episodes(force_rescan: bool = False) -> List[Dict]:
             except OSError as e:
                 print(f"⚠ 读取 results.jsonl 失败 ({path}): {e}")
 
-        episodes = []
-        for idx, ep in enumerate(sorted(episodes_by_video.values(), key=lambda x: x["episode_id"])):
-            frames = sorted(ep["sampled_frames"], key=lambda x: x["frame_index"])
-            ep["sampled_frames"] = _pick_evenly_spaced_result_frames(frames, SANITY_RESULTS_MAX_FRAMES_PER_EPISODE)
+        episodes: List[Dict[str, Any]] = []
+        episodes_by_id: Dict[str, Dict[str, Any]] = {}
+        for idx, raw_ep in enumerate(sorted(episodes_by_video.values(), key=lambda x: x["episode_id"])):
+            ep = dict(raw_ep)
+            ep["result_frame_indices"] = sorted(set(ep["result_frame_indices"]))
             ep["episode_index"] = idx
             episodes.append(ep)
+            episodes_by_id[ep["episode_id"]] = ep
 
+        for frame in frames:
+            ep = episodes_by_id.get(frame["episode_id"])
+            if ep is None:
+                continue
+            frame["episode_index"] = ep["episode_index"]
+            frame["episode_frame_count"] = ep["result_frame_count"]
+
+        index = {
+            "frames": frames,
+            "episodes": episodes,
+            "episodes_by_id": episodes_by_id,
+        }
+        _save_pickle_cache(
+            cache_file,
+            {
+                "version": SANITY_RESULTS_INDEX_CACHE_VERSION,
+                "signature": signature,
+                "index": index,
+            },
+        )
+
+        _SANITY_RESULTS_INDEX = index
         _SANITY_RESULTS_EPISODES = episodes
         _SANITY_RESULTS_SIGNATURE = signature
         print(
-            f"✓ 加载 sanity results.jsonl: {len(files)} 个文件, {total_lines} 行, "
+            f"✓ 加载 sanity results.jsonl: {len(files)} 个文件, {len(frames)} 帧, "
             f"{len(episodes)} 个 episodes"
         )
-        return episodes
+        return index
+
+
+def scan_sanity_result_episodes(force_rescan: bool = False) -> List[Dict]:
+    return scan_sanity_results_index(force_rescan=force_rescan).get("episodes", [])
 
 
 def _count_jpg_files(dir_path: Path) -> int:
@@ -695,61 +840,178 @@ def load_episode_frames_from_shard(
     return results
 
 
-def load_episode_frames_from_results(
-    frame_entries: List[Dict],
-    max_width: int = 640,
-) -> List[str]:
-    """从 results.jsonl 提供的 tar_path/member_name 直接加载采样帧并绘制检测框。"""
+def _get_results_render_cache_paths(entry: Dict[str, Any], max_width: int) -> Tuple[Path, Path]:
+    key = _hash_json_payload(
+        {
+            "version": SANITY_RESULTS_RENDER_CACHE_VERSION,
+            "tar_path": entry.get("tar_path"),
+            "member_name": entry.get("member_name"),
+            "normalized_boxes": entry.get("normalized_boxes", []),
+            "max_width": max_width,
+        }
+    )
+    cache_dir = _get_sanity_results_render_cache_dir()
+    return cache_dir / f"{key}.webp", cache_dir / f"{key}.jpg"
+
+
+def _load_cached_image_data_url(entry: Dict[str, Any], max_width: int) -> Optional[str]:
+    webp_path, jpg_path = _get_results_render_cache_paths(entry, max_width)
+    for path, mime in ((webp_path, "image/webp"), (jpg_path, "image/jpeg")):
+        if not path.exists():
+            continue
+        try:
+            return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('utf-8')}"
+        except OSError:
+            continue
+    return None
+
+
+def _save_cached_rendered_image(entry: Dict[str, Any], max_width: int, encoded_bytes: bytes, use_webp: bool) -> None:
+    webp_path, jpg_path = _get_results_render_cache_paths(entry, max_width)
+    target_path = webp_path if use_webp else jpg_path
+    try:
+        target_path.write_bytes(encoded_bytes)
+    except OSError:
+        pass
+
+
+def _get_results_tar_index_cache_file(tar_path: str) -> Path:
+    return _get_sanity_results_tar_index_cache_dir() / f"{hashlib.sha1(tar_path.encode('utf-8')).hexdigest()}.pkl"
+
+
+def _build_results_tar_offset_index(tar_path: str) -> Optional[Dict[str, Any]]:
     import tarfile
 
-    frame_data: Dict[int, bytes] = {}
-    grouped: Dict[str, List[Dict]] = {}
+    try:
+        with tarfile.open(tar_path, "r") as tar:
+            members = tar.getmembers()
+    except Exception as e:
+        print(f"⚠ 构建 tar 索引失败 ({tar_path}): {e}", flush=True)
+        return None
+
+    offsets: Dict[str, Tuple[int, int]] = {}
+    basename_to_name: Dict[str, str] = {}
+    ambiguous_basenames: Set[str] = set()
+    names: List[str] = []
+    for member in members:
+        if not member.isfile():
+            continue
+        names.append(member.name)
+        offsets[member.name] = (int(member.offset_data), int(member.size))
+        base = os.path.basename(member.name)
+        if base in ambiguous_basenames:
+            continue
+        if base in basename_to_name:
+            basename_to_name.pop(base, None)
+            ambiguous_basenames.add(base)
+        else:
+            basename_to_name[base] = member.name
+
+    return {
+        "offsets": offsets,
+        "names": names,
+        "basename_to_name": basename_to_name,
+    }
+
+
+def _get_results_tar_offset_index(tar_path: str) -> Optional[Dict[str, Any]]:
+    resolved = str(Path(tar_path).resolve())
+    with _RESULTS_TAR_INDEX_LOCK:
+        cached = _RESULTS_TAR_INDEX_CACHE.get(resolved)
+        if cached is not None:
+            return cached
+
+    cache_file = _get_results_tar_index_cache_file(resolved)
+    cached_payload = _load_pickle_cache(cache_file)
+    if isinstance(cached_payload, dict) and isinstance(cached_payload.get("index"), dict):
+        index = cached_payload["index"]
+        with _RESULTS_TAR_INDEX_LOCK:
+            _RESULTS_TAR_INDEX_CACHE[resolved] = index
+        return index
+
+    index = _build_results_tar_offset_index(resolved)
+    if index is None:
+        return None
+    _save_pickle_cache(cache_file, {"index": index})
+    with _RESULTS_TAR_INDEX_LOCK:
+        _RESULTS_TAR_INDEX_CACHE[resolved] = index
+    return index
+
+
+def _resolve_results_tar_member(
+    tar_index: Dict[str, Any],
+    member_name: str,
+) -> Optional[Tuple[str, Tuple[int, int]]]:
+    offsets = tar_index.get("offsets", {})
+    names = tar_index.get("names", [])
+    basename_to_name = tar_index.get("basename_to_name", {})
+
+    for candidate in (member_name, f"./{member_name}"):
+        offset = offsets.get(candidate)
+        if offset is not None:
+            return candidate, offset
+
+    base = os.path.basename(member_name)
+    canonical = basename_to_name.get(base)
+    if canonical:
+        offset = offsets.get(canonical)
+        if offset is not None:
+            return canonical, offset
+
+    for name in names:
+        if name.endswith(member_name):
+            offset = offsets.get(name)
+            if offset is not None:
+                return name, offset
+    return None
+
+
+def _read_raw_member_from_tar_file(fp, offset_and_size: Tuple[int, int]) -> bytes:
+    offset, size = offset_and_size
+    fp.seek(offset)
+    return fp.read(size)
+
+
+def load_episode_frames_from_results(
+    frame_entries: List[Dict],
+    max_width: int = SANITY_RESULTS_FRAME_MAX_WIDTH,
+) -> List[Optional[str]]:
+    """从 results.jsonl 提供的 tar_path/member_name 直接加载帧并绘制检测框。"""
+    results: List[Optional[str]] = [None] * len(frame_entries)
+    misses_by_tar: Dict[str, List[Dict[str, Any]]] = {}
+
     for idx, entry in enumerate(frame_entries):
-        grouped.setdefault(entry["tar_path"], []).append({"idx": idx, **entry})
+        cached = _load_cached_image_data_url(entry, max_width)
+        if cached is not None:
+            results[idx] = cached
+            continue
+        misses_by_tar.setdefault(entry["tar_path"], []).append({"idx": idx, "entry": entry})
 
-    for tar_path, entries in grouped.items():
+    raw_frame_data: Dict[int, bytes] = {}
+    for tar_path, entries in misses_by_tar.items():
+        tar_index = _get_results_tar_offset_index(tar_path)
+        if tar_index is None:
+            continue
         try:
-            with tarfile.open(tar_path, "r") as tar:
-                members = tar.getmembers()
-                members_by_name = {member.name: member for member in members}
-                members_by_basename: Dict[str, List] = {}
-                for member in members:
-                    base = os.path.basename(member.name)
-                    members_by_basename.setdefault(base, []).append(member)
-
-                def resolve_member(member_name: str):
-                    direct = members_by_name.get(member_name)
-                    if direct is not None:
-                        return direct
-                    prefixed = members_by_name.get(f"./{member_name}")
-                    if prefixed is not None:
-                        return prefixed
-                    basename_matches = members_by_basename.get(os.path.basename(member_name), [])
-                    if len(basename_matches) == 1:
-                        return basename_matches[0]
-                    for member in members:
-                        if member.name.endswith(member_name):
-                            return member
-                    return None
-
-                for entry in entries:
-                    member = resolve_member(entry["member_name"])
-                    if member is None:
+            with open(tar_path, "rb") as fp:
+                for wrapped in entries:
+                    entry = wrapped["entry"]
+                    resolved = _resolve_results_tar_member(tar_index, entry["member_name"])
+                    if resolved is None:
                         print(
                             f"⚠ tar 中未找到成员 ({os.path.basename(tar_path)} :: {entry['member_name']})",
                             flush=True,
                         )
                         continue
-                    extracted = tar.extractfile(member)
-                    if extracted is None:
-                        continue
-                    frame_data[entry["idx"]] = extracted.read()
+                    _, offset_and_size = resolved
+                    raw_frame_data[wrapped["idx"]] = _read_raw_member_from_tar_file(fp, offset_and_size)
         except Exception as e:
             print(f"⚠ 读取 results tar 失败 ({tar_path}): {e}", flush=True)
 
-    results = []
     for idx, entry in enumerate(frame_entries):
-        raw = frame_data.get(idx)
+        if results[idx] is not None:
+            continue
+        raw = raw_frame_data.get(idx)
         if raw is None:
             continue
         try:
@@ -779,12 +1041,16 @@ def load_episode_frames_from_results(
 
             buf = io.BytesIO()
             try:
-                img.save(buf, format="WEBP", quality=80, method=4)
-                results.append(f"data:image/webp;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}")
+                img.save(buf, format="WEBP", quality=78, method=4)
+                encoded = buf.getvalue()
+                _save_cached_rendered_image(entry, max_width, encoded, use_webp=True)
+                results[idx] = f"data:image/webp;base64,{base64.b64encode(encoded).decode('utf-8')}"
             except Exception:
                 buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=75)
-                results.append(f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}")
+                img.save(buf, format="JPEG", quality=72)
+                encoded = buf.getvalue()
+                _save_cached_rendered_image(entry, max_width, encoded, use_webp=False)
+                results[idx] = f"data:image/jpeg;base64,{base64.b64encode(encoded).decode('utf-8')}"
         except Exception as e:
             print(f"⚠ 解码 results 帧失败 ({entry.get('member_name')}): {e}", flush=True)
 
@@ -943,12 +1209,40 @@ def init_db() -> None:
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sanity_frame_annotations (
+                episode_id TEXT NOT NULL,
+                frame_index INTEGER NOT NULL,
+                dataset_name TEXT,
+                episode_name TEXT,
+                episode_index INTEGER,
+                state TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (episode_id, frame_index)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sanity_reviewed_frames (
+                episode_id TEXT NOT NULL,
+                frame_index INTEGER NOT NULL,
+                dataset_name TEXT,
+                episode_name TEXT,
+                episode_index INTEGER,
+                user_id TEXT NOT NULL,
+                reviewed_at TEXT NOT NULL,
+                PRIMARY KEY (episode_id, frame_index)
+            )
+        """)
+
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS idx_view_log_episode ON view_log(episode_id)",
             "CREATE INDEX IF NOT EXISTS idx_view_log_user ON view_log(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_reviewing_episode ON reviewing_episodes(episode_id)",
             "CREATE INDEX IF NOT EXISTS idx_reviewed_episode ON reviewed_episodes(episode_id)",
             "CREATE INDEX IF NOT EXISTS idx_annotation_reasons_episode ON annotation_reasons(episode_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sanity_frame_annotations_episode ON sanity_frame_annotations(episode_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sanity_reviewed_frames_episode ON sanity_reviewed_frames(episode_id)",
         ]:
             conn.execute(idx_sql)
 
@@ -1203,6 +1497,158 @@ def build_rework_frame_indices(
     return legacy_ok[:max_frames]
 
 
+def _load_results_frame_annotation_states(
+    conn: sqlite3.Connection,
+    frame_batch: List[Dict[str, Any]],
+) -> Dict[Tuple[str, int], str]:
+    episode_ids = sorted({frame["episode_id"] for frame in frame_batch if frame.get("episode_id")})
+    if not episode_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(episode_ids))
+    rows = conn.execute(
+        f"""
+        SELECT episode_id, frame_index, state
+        FROM sanity_frame_annotations
+        WHERE episode_id IN ({placeholders})
+        """,
+        episode_ids,
+    ).fetchall()
+    frame_pairs = {(frame["episode_id"], int(frame["frame_index"])) for frame in frame_batch}
+    out: Dict[Tuple[str, int], str] = {}
+    for row in rows:
+        key = (row["episode_id"], int(row["frame_index"]))
+        if key in frame_pairs:
+            out[key] = row["state"]
+    return out
+
+
+def _upsert_legacy_safe_annotation(
+    cursor: sqlite3.Cursor,
+    episode_id: str,
+    episode_name: str,
+    dataset_name: str,
+    episode_index: Optional[int],
+    content: str,
+    updated_at: str,
+) -> bool:
+    existing_row = cursor.execute(
+        "SELECT dataset_name FROM annotations WHERE episode_id = ?",
+        (episode_id,),
+    ).fetchone()
+    if existing_row is not None and not is_factory_dataset_name(existing_row["dataset_name"]):
+        return False
+
+    cursor.execute(
+        """
+        INSERT INTO annotations (episode_id, episode_name, dataset_name, episode_index, content, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(episode_id) DO UPDATE SET
+            episode_name = excluded.episode_name,
+            dataset_name = excluded.dataset_name,
+            episode_index = excluded.episode_index,
+            content = excluded.content,
+            updated_at = excluded.updated_at
+        """,
+        (episode_id, episode_name, dataset_name, episode_index, content, updated_at),
+    )
+    return True
+
+
+def _finalize_results_episode_annotations(
+    conn: sqlite3.Connection,
+    results_index: Dict[str, Any],
+    episode_ids: Set[str],
+    user_id: str,
+) -> List[str]:
+    cursor = conn.cursor()
+    episodes_by_id = results_index.get("episodes_by_id", {})
+    skipped_legacy_conflicts: List[str] = []
+    now = datetime.utcnow().isoformat()
+
+    for episode_id in sorted(episode_ids):
+        ep = episodes_by_id.get(episode_id)
+        if ep is None:
+            continue
+        dataset_name = ep.get("dataset_name", "")
+        if not is_factory_dataset_name(dataset_name):
+            continue
+
+        valid_frame_indices = {int(x) for x in ep.get("result_frame_indices", [])}
+        expected_count = len(valid_frame_indices)
+        if expected_count <= 0:
+            continue
+        reviewed_rows = cursor.execute(
+            "SELECT frame_index FROM sanity_reviewed_frames WHERE episode_id = ?",
+            (episode_id,),
+        ).fetchall()
+        reviewed_count = sum(1 for row in reviewed_rows if int(row["frame_index"]) in valid_frame_indices)
+        if reviewed_count < expected_count:
+            continue
+
+        bad_box: List[int] = []
+        not_clear: List[int] = []
+        rows = cursor.execute(
+            """
+            SELECT frame_index, state
+            FROM sanity_frame_annotations
+            WHERE episode_id = ?
+            ORDER BY frame_index
+            """,
+            (episode_id,),
+        ).fetchall()
+        for row in rows:
+            frame_index = int(row["frame_index"])
+            if frame_index not in valid_frame_indices:
+                continue
+            if row["state"] == "bad_box":
+                bad_box.append(frame_index)
+            elif row["state"] == "not_clear":
+                not_clear.append(frame_index)
+
+        bad_frames = sorted(set(bad_box + not_clear))
+        content = "BAD_FRAMES:" + ",".join(map(str, bad_frames)) if bad_frames else "alright"
+        ok = _upsert_legacy_safe_annotation(
+            cursor,
+            episode_id=episode_id,
+            episode_name=ep.get("episode_name", episode_id),
+            dataset_name=dataset_name,
+            episode_index=ep.get("episode_index"),
+            content=content,
+            updated_at=now,
+        )
+        if not ok:
+            skipped_legacy_conflicts.append(episode_id)
+            continue
+
+        if bad_frames:
+            reason_content = SANITY_REASON_V1_PREFIX + json.dumps(
+                {"bad_box": bad_box, "not_clear": not_clear},
+                separators=(",", ":"),
+            )
+            cursor.execute(
+                """
+                INSERT INTO annotation_reasons (episode_id, content, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(episode_id) DO UPDATE SET
+                    content = excluded.content,
+                    updated_at = excluded.updated_at
+                """,
+                (episode_id, reason_content, now),
+            )
+        else:
+            cursor.execute("DELETE FROM annotation_reasons WHERE episode_id = ?", (episode_id,))
+
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO reviewed_episodes (episode_id, user_id, has_annotation, reviewed_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (episode_id, user_id, bool(bad_frames), now),
+        )
+
+    return skipped_legacy_conflicts
+
+
 # ─── 路由 ─────────────────────────────────────────────────────────────
 
 
@@ -1225,13 +1671,33 @@ def rework_check():
 @app.route("/api/total-episodes", methods=["GET"])
 def api_total_episodes():
     """获取总 episode 数"""
-    episodes = scan_sanity_result_episodes() or scan_factory_episodes()
+    results_index = scan_sanity_results_index()
+    result_frames = results_index.get("frames", [])
+    if result_frames:
+        dataset_counts: Dict[str, int] = {}
+        for frame in result_frames:
+            dataset_name = frame.get("dataset_name", "unknown")
+            dataset_counts[dataset_name] = dataset_counts.get(dataset_name, 0) + 1
+        return jsonify({
+            "success": True,
+            "queue_mode": "frame",
+            "item_label": "frames",
+            "total_items": len(result_frames),
+            "total_frames": len(result_frames),
+            "total_episodes": len(result_frames),
+            "datasets": [{"name": name, "count": count} for name, count in sorted(dataset_counts.items())],
+        })
+
+    episodes = scan_factory_episodes()
     dataset_counts: Dict[str, int] = {}
     for ep in episodes:
         dataset_name = ep.get("dataset_name", "unknown")
         dataset_counts[dataset_name] = dataset_counts.get(dataset_name, 0) + 1
     return jsonify({
         "success": True,
+        "queue_mode": "episode",
+        "item_label": "episodes",
+        "total_items": len(episodes),
         "total_episodes": len(episodes),
         "datasets": [{"name": name, "count": count} for name, count in sorted(dataset_counts.items())],
     })
@@ -1247,10 +1713,88 @@ def api_episodes_sequential():
     global_offset = request.args.get("offset", default=0, type=int)
     user_id = request.args.get("user_id", default="anonymous", type=str)
 
-    # 扫描 episodes
+    conn = get_db_connection()
+
     t0 = time.time()
-    all_episodes = scan_sanity_result_episodes() or scan_factory_episodes()
+    results_index = scan_sanity_results_index()
+    result_frames = results_index.get("frames", [])
     timers["scan_episodes"] = time.time() - t0
+
+    if result_frames:
+        total_items = len(result_frames)
+        if global_offset >= total_items:
+            return jsonify({
+                "success": False,
+                "message": f"Index {global_offset} 超出范围！总共只有 {total_items} 个 frames",
+                "queue_mode": "frame",
+                "total_items": total_items,
+                "total_episodes": total_items,
+            }), 400
+
+        end_idx = min(global_offset + limit, total_items)
+        batch_frames = result_frames[global_offset:end_idx]
+        next_offset = end_idx if end_idx < total_items else 0
+
+        t1 = time.time()
+        state_by_frame = _load_results_frame_annotation_states(conn, batch_frames)
+        timers["db_query"] = time.time() - t1
+
+        t2 = time.time()
+        rendered_images = load_episode_frames_from_results(batch_frames, max_width=SANITY_RESULTS_FRAME_MAX_WIDTH)
+        items: List[Dict[str, Any]] = []
+        fail_reasons: List[str] = []
+        for frame, image in zip(batch_frames, rendered_images):
+            if image is None:
+                fail_reasons.append(f"load results frame returned empty for {frame['frame_id']}")
+                continue
+            item = {
+                "frame_id": frame["frame_id"],
+                "episode_id": frame["episode_id"],
+                "episode_name": frame.get("episode_name", frame["episode_id"]),
+                "dataset_name": frame.get("dataset_name", ""),
+                "episode_index": frame.get("episode_index"),
+                "frame_index": int(frame["frame_index"]),
+                "queue_index": int(frame.get("queue_index", 0)),
+                "prob_is_bad": frame.get("prob_is_bad"),
+                "image": image,
+                "annotation_state": state_by_frame.get((frame["episode_id"], int(frame["frame_index"])), "ok"),
+            }
+            items.append(item)
+        timers["load_and_encode"] = time.time() - t2
+
+        total_time = time.time() - timer_start
+        timers["total"] = total_time
+        timers["other"] = total_time - sum(v for k, v in timers.items() if k not in ("total", "other"))
+
+        print(f"\n{'=' * 60}")
+        print(f"[{user_id[:8]}] results frame queue (offset={global_offset}, limit={limit})")
+        print(f"{'=' * 60}")
+        print(f"  扫描索引:       {timers.get('scan_episodes', 0):.3f}s")
+        print(f"  数据库查询:     {timers.get('db_query', 0):.3f}s")
+        print(f"  加载+编码图像:  {timers.get('load_and_encode', 0):.3f}s")
+        print(f"  成功/失败:      {len(items)}/{len(batch_frames) - len(items)}")
+        print(f"  总耗时:         {total_time:.3f}s")
+        print(f"{'=' * 60}\n")
+
+        resp: Dict[str, Any] = {
+            "success": True,
+            "queue_mode": "frame",
+            "item_label": "frames",
+            "items": items,
+            "episodes": items,
+            "has_more": next_offset != 0,
+            "next_offset": next_offset,
+            "total_items": total_items,
+            "total_frames": total_items,
+            "total_episodes": total_items,
+            "collected_count": len(items),
+            "performance": timers,
+        }
+        if not items and fail_reasons:
+            resp["debug_fail_reasons"] = fail_reasons[:5]
+        return jsonify(resp)
+
+    all_episodes = scan_factory_episodes()
 
     total_episodes = len(all_episodes)
 
@@ -1258,17 +1802,15 @@ def api_episodes_sequential():
         return jsonify({
             "success": False,
             "message": f"Index {global_offset} 超出范围！总共只有 {total_episodes} 个 episodes",
+            "queue_mode": "episode",
             "total_episodes": total_episodes,
         }), 400
 
-    # 切片
     end_idx = min(global_offset + limit, total_episodes)
     batch = all_episodes[global_offset:end_idx]
     next_offset = end_idx if end_idx < total_episodes else 0
 
-    # 批量查询标注状态
     t1 = time.time()
-    conn = get_db_connection()
     episode_ids = [ep["episode_id"] for ep in batch]
     dataset_names = sorted({ep.get("dataset_name") for ep in batch if is_factory_dataset_name(ep.get("dataset_name"))})
     annotation_rows = []
@@ -1433,9 +1975,12 @@ def api_episodes_sequential():
 
     resp = {
         "success": True,
+        "queue_mode": "episode",
+        "item_label": "episodes",
         "episodes": results,
         "has_more": next_offset != 0,
         "next_offset": next_offset,
+        "total_items": total_episodes,
         "total_episodes": total_episodes,
         "collected_count": len(results),
         "performance": timers,
@@ -1816,7 +2361,8 @@ def api_cancel_review():
 def api_sanity_check_submit():
     """提交 sanity check 标注结果"""
     try:
-        data = request.json
+        data = request.json or {}
+        queue_mode = data.get("queue_mode", "episode")
         raw_episodes = data.get("episodes", [])
         reviewed_episodes = data.get("reviewed_episodes", [])
         user_id = data.get("user_id", "anonymous")
@@ -1825,6 +2371,93 @@ def api_sanity_check_submit():
         conn = get_db_connection()
         cursor = conn.cursor()
         skipped_legacy_conflicts: List[str] = []
+
+        if queue_mode == "frame":
+            frame_items = data.get("frames", [])
+            if not isinstance(frame_items, list):
+                return jsonify({"success": False, "message": "frames 须为数组"}), 400
+
+            results_index = scan_sanity_results_index()
+            affected_episode_ids: Set[str] = set()
+            saved_count = 0
+            bad_count = 0
+            now = datetime.utcnow().isoformat()
+
+            for item in frame_items:
+                episode_id = item.get("episode_id")
+                dataset_name = item.get("dataset_name", "")
+                episode_name = item.get("episode_name", episode_id or "")
+                episode_index = item.get("episode_index")
+                state = str(item.get("state", "ok"))
+                if not episode_id or not is_factory_dataset_name(dataset_name):
+                    continue
+                try:
+                    frame_index = int(item.get("frame_index"))
+                except (TypeError, ValueError):
+                    continue
+
+                existing_row = cursor.execute(
+                    "SELECT dataset_name FROM annotations WHERE episode_id = ?",
+                    (episode_id,),
+                ).fetchone()
+                if existing_row is not None and not is_factory_dataset_name(existing_row["dataset_name"]):
+                    skipped_legacy_conflicts.append(episode_id)
+                    continue
+
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO sanity_reviewed_frames
+                        (episode_id, frame_index, dataset_name, episode_name, episode_index, user_id, reviewed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (episode_id, frame_index, dataset_name, episode_name, episode_index, user_id, now),
+                )
+
+                if state in ("bad_box", "not_clear"):
+                    cursor.execute(
+                        """
+                        INSERT INTO sanity_frame_annotations
+                            (episode_id, frame_index, dataset_name, episode_name, episode_index, state, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(episode_id, frame_index) DO UPDATE SET
+                            dataset_name = excluded.dataset_name,
+                            episode_name = excluded.episode_name,
+                            episode_index = excluded.episode_index,
+                            state = excluded.state,
+                            updated_at = excluded.updated_at
+                        """,
+                        (episode_id, frame_index, dataset_name, episode_name, episode_index, state, now),
+                    )
+                    bad_count += 1
+                else:
+                    cursor.execute(
+                        "DELETE FROM sanity_frame_annotations WHERE episode_id = ? AND frame_index = ?",
+                        (episode_id, frame_index),
+                    )
+
+                saved_count += 1
+                affected_episode_ids.add(episode_id)
+
+            skipped_legacy_conflicts.extend(
+                _finalize_results_episode_annotations(conn, results_index, affected_episode_ids, user_id)
+            )
+
+            if session_id:
+                cursor.execute("DELETE FROM reviewing_episodes WHERE session_id = ?", (session_id,))
+            else:
+                cursor.execute("DELETE FROM reviewing_episodes WHERE user_id = ?", (user_id,))
+
+            commit_with_retry(conn)
+
+            return jsonify({
+                "success": True,
+                "message": f"已提交 {saved_count} 个 frames ({saved_count - bad_count} 正常, {bad_count} 有问题)",
+                "total_count": saved_count,
+                "alright_count": saved_count - bad_count,
+                "bad_count": bad_count,
+                "completed_episode_count": len(affected_episode_ids),
+                "skipped_legacy_conflicts": sorted(set(skipped_legacy_conflicts))[:20],
+            })
 
         normalized_episodes = []
         if isinstance(raw_episodes, list) and raw_episodes:
@@ -1892,32 +2525,17 @@ def api_sanity_check_submit():
             if not is_factory_dataset_name(dataset):
                 continue
 
-            existing_row = cursor.execute(
-                "SELECT dataset_name FROM annotations WHERE episode_id = ?",
-                (episode_id,),
-            ).fetchone()
-            if existing_row is not None and not is_factory_dataset_name(existing_row["dataset_name"]):
+            if not _upsert_legacy_safe_annotation(
+                cursor,
+                episode_id=episode_id,
+                episode_name=episode_name,
+                dataset_name=dataset,
+                episode_index=episode_index,
+                content=("BAD_FRAMES:" + ",".join(map(str, bad_frames))) if bad_frames else "alright",
+                updated_at=datetime.utcnow().isoformat(),
+            ):
                 skipped_legacy_conflicts.append(episode_id)
                 continue
-
-            if bad_frames:
-                content = "BAD_FRAMES:" + ",".join(map(str, bad_frames))
-            else:
-                content = "alright"
-
-            cursor.execute(
-                """
-                INSERT INTO annotations (episode_id, episode_name, dataset_name, episode_index, content, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(episode_id) DO UPDATE SET
-                    episode_name = excluded.episode_name,
-                    dataset_name = excluded.dataset_name,
-                    episode_index = excluded.episode_index,
-                    content = excluded.content,
-                    updated_at = excluded.updated_at
-                """,
-                (episode_id, episode_name, dataset, episode_index, content, datetime.utcnow().isoformat()),
-            )
 
             if bad_frames:
                 reason_content = SANITY_REASON_V1_PREFIX + json.dumps(reasoned, separators=(",", ":"))
@@ -1979,7 +2597,7 @@ def main():
     should_preload = (not USE_RELOADER) or (os.environ.get("WERKZEUG_RUN_MAIN") == "true")
     if should_preload:
         # sanity-check 若配置了 results.jsonl，则优先预热该缓存；否则走原 factory 缓存。
-        if scan_sanity_result_episodes():
+        if scan_sanity_results_index().get("frames"):
             print("✓ 已预热 sanity results.jsonl 缓存")
         else:
             scan_factory_episodes()
