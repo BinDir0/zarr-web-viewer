@@ -154,6 +154,17 @@
             background: #2a2a2a;
             border-radius: 8px;
             padding: 10px;
+            border: 2px solid transparent;
+        }
+
+        .frame-card.annotated.alright {
+            border-color: #4CAF50;
+            box-shadow: 0 0 10px rgba(76, 175, 80, 0.22);
+        }
+
+        .frame-card.annotated.bad {
+            border-color: #f44336;
+            box-shadow: 0 0 10px rgba(244, 67, 54, 0.22);
         }
 
         .frame-card-header {
@@ -297,24 +308,24 @@
             display: none;
         }
 
-        .frame-wrapper.state-bad_box .frame-mask {
-            background: rgba(180, 75, 30, 0.58);
+        .frame-wrapper.state-missing_annotation .frame-mask {
+            background: rgba(176, 115, 28, 0.58);
         }
 
-        .frame-wrapper.state-bad_box .frame-mask-label {
+        .frame-wrapper.state-missing_annotation .frame-mask-label {
             color: #fff7f0;
-            background: rgba(120, 45, 12, 0.55);
+            background: rgba(118, 76, 16, 0.55);
             border: 1px solid rgba(255, 200, 160, 0.35);
         }
 
-        .frame-wrapper.state-not_clear .frame-mask {
-            background: rgba(75, 50, 130, 0.55);
+        .frame-wrapper.state-wrong_annotation .frame-mask {
+            background: rgba(145, 42, 42, 0.55);
         }
 
-        .frame-wrapper.state-not_clear .frame-mask-label {
-            color: #f3ecff;
-            background: rgba(55, 35, 95, 0.55);
-            border: 1px solid rgba(200, 170, 255, 0.35);
+        .frame-wrapper.state-wrong_annotation .frame-mask-label {
+            color: #fff2f2;
+            background: rgba(110, 28, 28, 0.55);
+            border: 1px solid rgba(255, 170, 170, 0.35);
         }
 
         .frame-index {
@@ -396,10 +407,10 @@
             提交并退出
         </button>
         <div class="interaction-hint">
-            单击 = A（手部可见，标注框错误）；双击 = B（手部不清晰）；三击或不点 = 正确
+            单击 = A（双手清晰可见，但缺少标注）；双击 = B（错误标注）；三击或不点 = 正确
         </div>
     </div>
 
-    <script src="/static/sanity_check.js?v=14"></script>
+    <script src="/static/sanity_check.js?v=15"></script>
 </body>
 </html>

@@ -1277,6 +1277,7 @@ def init_db() -> None:
 REWORK_MAX_FRAMES_PER_EPISODE = 24
 BOX_OUTLINE_WIDTH = 10
 SANITY_REASON_V1_PREFIX = "SANITY_REASON_V1:"
+SANITY_REASON_V2_PREFIX = "SANITY_REASON_V2:"
 
 
 def parse_legacy_bad_frame_indices(content: str) -> List[int]:
@@ -1318,6 +1319,30 @@ def normalize_reason_payload(bad_box, not_clear) -> Dict[str, List[int]]:
     return {"bad_box": bb, "not_clear": nc}
 
 
+def normalize_sanity_reason_payload(
+    wrong_annotation=None,
+    missing_annotation=None,
+    bad_box=None,
+    not_clear=None,
+) -> Dict[str, List[int]]:
+    def _ints(seq) -> List[int]:
+        out: List[int] = []
+        if not isinstance(seq, list):
+            return out
+        for x in seq:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    wa_src = wrong_annotation if wrong_annotation is not None else bad_box
+    ma_src = missing_annotation if missing_annotation is not None else not_clear
+    wa = sorted(set(_ints(wa_src)))
+    ma = sorted(set(i for i in _ints(ma_src) if i not in wa))
+    return {"wrong_annotation": wa, "missing_annotation": ma}
+
+
 def _parse_reason_payload_with_prefix(content: str, prefix: str) -> Optional[Dict]:
     if not content or not content.startswith(prefix):
         return None
@@ -1330,6 +1355,23 @@ def _parse_reason_payload_with_prefix(content: str, prefix: str) -> Optional[Dic
     return normalize_reason_payload(raw.get("bad_box"), raw.get("not_clear"))
 
 
+def _parse_sanity_reason_payload_with_prefix(content: str, prefix: str) -> Optional[Dict]:
+    if not content or not content.startswith(prefix):
+        return None
+    try:
+        raw = json.loads(content[len(prefix) :])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return normalize_sanity_reason_payload(
+        wrong_annotation=raw.get("wrong_annotation"),
+        missing_annotation=raw.get("missing_annotation"),
+        bad_box=raw.get("bad_box"),
+        not_clear=raw.get("not_clear"),
+    )
+
+
 def parse_rework_v1_payload(content: str) -> Optional[Dict]:
     """解析返工标注 REWORK_V1:{json}，用于回填 UI。"""
     return _parse_reason_payload_with_prefix(content, "REWORK_V1:")
@@ -1337,7 +1379,10 @@ def parse_rework_v1_payload(content: str) -> Optional[Dict]:
 
 def parse_sanity_reason_payload(content: str) -> Optional[Dict]:
     """解析 sanity check 的错误原因扩展字段。"""
-    return _parse_reason_payload_with_prefix(content, SANITY_REASON_V1_PREFIX)
+    parsed_v2 = _parse_sanity_reason_payload_with_prefix(content, SANITY_REASON_V2_PREFIX)
+    if parsed_v2 is not None:
+        return parsed_v2
+    return _parse_sanity_reason_payload_with_prefix(content, SANITY_REASON_V1_PREFIX)
 
 
 def build_annotation_status(content: str, sanity_reason: Optional[Dict] = None) -> Dict:
@@ -1354,13 +1399,13 @@ def build_annotation_status(content: str, sanity_reason: Optional[Dict] = None) 
     if content.startswith("BAD_FRAMES:") or content.startswith("BAD_FRAME:"):
         bad_frames = sorted(set(parse_legacy_bad_frame_indices(content)))
         if sanity_reason is None:
-            reasoned = {"bad_box": list(bad_frames), "not_clear": []}
+            reasoned = {"wrong_annotation": list(bad_frames), "missing_annotation": []}
         else:
-            bb = [i for i in sanity_reason["bad_box"] if i in bad_frames]
-            nc = [i for i in sanity_reason["not_clear"] if i in bad_frames and i not in bb]
-            assigned = set(bb) | set(nc)
+            wa = [i for i in sanity_reason["wrong_annotation"] if i in bad_frames]
+            ma = [i for i in sanity_reason["missing_annotation"] if i in bad_frames and i not in wa]
+            assigned = set(wa) | set(ma)
             missing = [i for i in bad_frames if i not in assigned]
-            reasoned = {"bad_box": sorted(set(bb + missing)), "not_clear": nc}
+            reasoned = {"wrong_annotation": sorted(set(wa + missing)), "missing_annotation": ma}
         return {
             "has_annotation": True,
             "mark_type": "bad" if bad_frames else "alright",
@@ -1372,7 +1417,7 @@ def build_annotation_status(content: str, sanity_reason: Optional[Dict] = None) 
         "has_annotation": True,
         "mark_type": "alright",
         "bad_frames": [],
-        "reasoned_annotation": {"bad_box": [], "not_clear": []},
+        "reasoned_annotation": {"wrong_annotation": [], "missing_annotation": []},
     }
 
 
@@ -1518,15 +1563,25 @@ def build_rework_frame_indices(
     return legacy_ok[:max_frames]
 
 
-def _load_results_frame_annotation_states(
+def _normalize_sanity_frame_state(state: Optional[str]) -> str:
+    if state == "bad_box":
+        return "wrong_annotation"
+    if state == "not_clear":
+        return "missing_annotation"
+    if state in ("wrong_annotation", "missing_annotation"):
+        return str(state)
+    return "ok"
+
+
+def _load_results_frame_review_info(
     conn: sqlite3.Connection,
     frame_batch: List[Dict[str, Any]],
-) -> Dict[Tuple[str, int], str]:
+) -> Dict[Tuple[str, int], Dict[str, Any]]:
     episode_ids = sorted({frame["episode_id"] for frame in frame_batch if frame.get("episode_id")})
     if not episode_ids:
         return {}
     placeholders = ",".join(["?"] * len(episode_ids))
-    rows = conn.execute(
+    annotation_rows = conn.execute(
         f"""
         SELECT episode_id, frame_index, state
         FROM sanity_frame_annotations
@@ -1534,12 +1589,27 @@ def _load_results_frame_annotation_states(
         """,
         episode_ids,
     ).fetchall()
+    reviewed_rows = conn.execute(
+        f"""
+        SELECT episode_id, frame_index
+        FROM sanity_reviewed_frames
+        WHERE episode_id IN ({placeholders})
+        """,
+        episode_ids,
+    ).fetchall()
     frame_pairs = {(frame["episode_id"], int(frame["frame_index"])) for frame in frame_batch}
-    out: Dict[Tuple[str, int], str] = {}
-    for row in rows:
+    out: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    for row in reviewed_rows:
         key = (row["episode_id"], int(row["frame_index"]))
         if key in frame_pairs:
-            out[key] = row["state"]
+            out[key] = {"reviewed": True, "state": "ok"}
+    for row in annotation_rows:
+        key = (row["episode_id"], int(row["frame_index"]))
+        if key in frame_pairs:
+            out[key] = {
+                "reviewed": True,
+                "state": _normalize_sanity_frame_state(row["state"]),
+            }
     return out
 
 
@@ -1606,8 +1676,8 @@ def _finalize_results_episode_annotations(
         if reviewed_count < expected_count:
             continue
 
-        bad_box: List[int] = []
-        not_clear: List[int] = []
+        wrong_annotation: List[int] = []
+        missing_annotation: List[int] = []
         rows = cursor.execute(
             """
             SELECT frame_index, state
@@ -1621,12 +1691,13 @@ def _finalize_results_episode_annotations(
             frame_index = int(row["frame_index"])
             if frame_index not in valid_frame_indices:
                 continue
-            if row["state"] == "bad_box":
-                bad_box.append(frame_index)
-            elif row["state"] == "not_clear":
-                not_clear.append(frame_index)
+            state = _normalize_sanity_frame_state(row["state"])
+            if state == "wrong_annotation":
+                wrong_annotation.append(frame_index)
+            elif state == "missing_annotation":
+                missing_annotation.append(frame_index)
 
-        bad_frames = sorted(set(bad_box + not_clear))
+        bad_frames = sorted(set(wrong_annotation + missing_annotation))
         content = "BAD_FRAMES:" + ",".join(map(str, bad_frames)) if bad_frames else "alright"
         ok = _upsert_legacy_safe_annotation(
             cursor,
@@ -1642,8 +1713,8 @@ def _finalize_results_episode_annotations(
             continue
 
         if bad_frames:
-            reason_content = SANITY_REASON_V1_PREFIX + json.dumps(
-                {"bad_box": bad_box, "not_clear": not_clear},
+            reason_content = SANITY_REASON_V2_PREFIX + json.dumps(
+                {"wrong_annotation": wrong_annotation, "missing_annotation": missing_annotation},
                 separators=(",", ":"),
             )
             cursor.execute(
@@ -1757,7 +1828,7 @@ def api_episodes_sequential():
         next_offset = end_idx if end_idx < total_items else 0
 
         t1 = time.time()
-        state_by_frame = _load_results_frame_annotation_states(conn, batch_frames)
+        review_info_by_frame = _load_results_frame_review_info(conn, batch_frames)
         timers["db_query"] = time.time() - t1
 
         t2 = time.time()
@@ -1768,6 +1839,7 @@ def api_episodes_sequential():
             if image is None:
                 fail_reasons.append(f"load results frame returned empty for {frame['frame_id']}")
                 continue
+            review_info = review_info_by_frame.get((frame["episode_id"], int(frame["frame_index"])), {})
             item = {
                 "frame_id": frame["frame_id"],
                 "episode_id": frame["episode_id"],
@@ -1778,7 +1850,8 @@ def api_episodes_sequential():
                 "queue_index": int(frame.get("queue_index", 0)),
                 "prob_is_bad": frame.get("prob_is_bad"),
                 "image": image,
-                "annotation_state": state_by_frame.get((frame["episode_id"], int(frame["frame_index"])), "ok"),
+                "annotation_state": review_info.get("state", "ok"),
+                "was_reviewed": bool(review_info.get("reviewed", False)),
             }
             items.append(item)
         timers["load_and_encode"] = time.time() - t2
@@ -2434,11 +2507,12 @@ def api_sanity_check_submit():
                     (episode_id, frame_index, dataset_name, episode_name, episode_index, user_id, now),
                 )
 
-                if state in ("bad_box", "not_clear"):
+                normalized_state = _normalize_sanity_frame_state(state)
+                if normalized_state in ("wrong_annotation", "missing_annotation"):
                     cursor.execute(
                         """
                         INSERT INTO sanity_frame_annotations
-                            (episode_id, frame_index, dataset_name, episode_name, episode_index, state, updated_at)
+                        (episode_id, frame_index, dataset_name, episode_name, episode_index, state, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(episode_id, frame_index) DO UPDATE SET
                             dataset_name = excluded.dataset_name,
@@ -2447,7 +2521,7 @@ def api_sanity_check_submit():
                             state = excluded.state,
                             updated_at = excluded.updated_at
                         """,
-                        (episode_id, frame_index, dataset_name, episode_name, episode_index, state, now),
+                        (episode_id, frame_index, dataset_name, episode_name, episode_index, normalized_state, now),
                     )
                     bad_count += 1
                 else:
@@ -2486,8 +2560,13 @@ def api_sanity_check_submit():
                 episode_id = episode_info.get("episode_id")
                 if not episode_id:
                     continue
-                reasoned = normalize_reason_payload(episode_info.get("bad_box"), episode_info.get("not_clear"))
-                bad_frames = sorted(set(reasoned["bad_box"] + reasoned["not_clear"]))
+                reasoned = normalize_sanity_reason_payload(
+                    wrong_annotation=episode_info.get("wrong_annotation"),
+                    missing_annotation=episode_info.get("missing_annotation"),
+                    bad_box=episode_info.get("bad_box"),
+                    not_clear=episode_info.get("not_clear"),
+                )
+                bad_frames = sorted(set(reasoned["wrong_annotation"] + reasoned["missing_annotation"]))
                 normalized_episodes.append({
                     "episode_id": episode_id,
                     "dataset": episode_info.get("dataset_name", episode_info.get("dataset", "")),
@@ -2520,7 +2599,7 @@ def api_sanity_check_submit():
                     "episode_name": episode_info.get("episode_name", ""),
                     "episode_index": episode_info.get("episode_index"),
                     "bad_frames": bad_frames,
-                    "reasoned_annotation": {"bad_box": list(bad_frames), "not_clear": []},
+                    "reasoned_annotation": {"wrong_annotation": list(bad_frames), "missing_annotation": []},
                 })
 
         if not isinstance(reviewed_episodes, list) or not reviewed_episodes:
@@ -2541,7 +2620,7 @@ def api_sanity_check_submit():
             episode_name = episode_info.get("episode_name")
             episode_index = episode_info.get("episode_index")
             bad_frames = episode_info.get("bad_frames", [])
-            reasoned = episode_info.get("reasoned_annotation", {"bad_box": [], "not_clear": []})
+            reasoned = episode_info.get("reasoned_annotation", {"wrong_annotation": [], "missing_annotation": []})
 
             if not is_factory_dataset_name(dataset):
                 continue
@@ -2559,7 +2638,7 @@ def api_sanity_check_submit():
                 continue
 
             if bad_frames:
-                reason_content = SANITY_REASON_V1_PREFIX + json.dumps(reasoned, separators=(",", ":"))
+                reason_content = SANITY_REASON_V2_PREFIX + json.dumps(reasoned, separators=(",", ":"))
                 cursor.execute(
                     """
                     INSERT INTO annotation_reasons (episode_id, content, updated_at)
