@@ -38,6 +38,7 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
         sanity_results_globs = [sanity_results_globs]
     SANITY_RESULTS_GLOBS = [str(x) for x in sanity_results_globs if str(x).strip()]
     SANITY_RESULTS_MAX_FRAMES_PER_EPISODE = int(config.get("sanity_results_max_frames_per_episode", 8))
+    SANITY_RESULTS_PROGRESS_INTERVAL_SEC = float(config.get("sanity_results_progress_interval_sec", 1.5))
     FACTORY_EPISODES_CACHE_FILE = Path(
         config.get(
             "factory_episode_cache_file",
@@ -138,6 +139,37 @@ def _get_paths_signature(paths: List[Path]) -> tuple:
     return tuple(signature)
 
 
+def _format_bytes(num_bytes: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(max(0, num_bytes))
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+    return f"{num_bytes}B"
+
+
+def _print_sanity_results_progress(
+    processed_bytes: int,
+    total_bytes: int,
+    file_index: int,
+    total_files: int,
+    total_lines: int,
+    total_episodes: int,
+    path: Optional[Path] = None,
+) -> None:
+    pct = 100.0 if total_bytes <= 0 else min(100.0, processed_bytes * 100.0 / total_bytes)
+    file_part = f"{file_index}/{total_files}" if total_files > 0 else "0/0"
+    path_part = f" | {path.name}" if path is not None else ""
+    print(
+        "[sanity preload] "
+        f"{pct:5.1f}% | files {file_part} | "
+        f"bytes {_format_bytes(processed_bytes)}/{_format_bytes(total_bytes)} | "
+        f"lines {total_lines:,} | episodes {total_episodes:,}{path_part}",
+        flush=True,
+    )
+
+
 def _guess_dataset_name_from_tar_path(tar_path: str) -> str:
     parent = Path(tar_path).parent.name
     if parent.startswith("factory"):
@@ -233,12 +265,31 @@ def scan_sanity_result_episodes(force_rescan: bool = False) -> List[Dict]:
 
         episodes_by_video: Dict[str, Dict] = {}
         total_lines = 0
-        for path in files:
+        total_bytes = sum(path.stat().st_size for path in files if path.exists())
+        processed_bytes = 0
+        last_progress_time = time.time()
+        print(
+            f"开始预热 sanity results.jsonl: {len(files)} 个文件, 总大小 {_format_bytes(total_bytes)}",
+            flush=True,
+        )
+        for file_idx, path in enumerate(files, start=1):
             try:
-                with path.open("r") as f:
-                    for line in f:
+                with path.open("rb") as f:
+                    for raw_line in f:
+                        processed_bytes += len(raw_line)
                         total_lines += 1
-                        line = line.strip()
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
+                        if time.time() - last_progress_time >= SANITY_RESULTS_PROGRESS_INTERVAL_SEC:
+                            _print_sanity_results_progress(
+                                processed_bytes=processed_bytes,
+                                total_bytes=total_bytes,
+                                file_index=file_idx,
+                                total_files=len(files),
+                                total_lines=total_lines,
+                                total_episodes=len(episodes_by_video),
+                                path=path,
+                            )
+                            last_progress_time = time.time()
                         if not line:
                             continue
                         try:
@@ -273,6 +324,15 @@ def scan_sanity_result_episodes(force_rescan: bool = False) -> List[Dict]:
                             "is_bad": _result_item_is_bad(item),
                             "prob_is_bad": item.get("prob_is_bad"),
                         })
+                _print_sanity_results_progress(
+                    processed_bytes=processed_bytes,
+                    total_bytes=total_bytes,
+                    file_index=file_idx,
+                    total_files=len(files),
+                    total_lines=total_lines,
+                    total_episodes=len(episodes_by_video),
+                    path=path,
+                )
             except OSError as e:
                 print(f"⚠ 读取 results.jsonl 失败 ({path}): {e}")
 
