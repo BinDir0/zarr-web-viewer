@@ -1,0 +1,155 @@
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans", "Noto Sans SC", sans-serif;
+  background: linear-gradient(180deg, #f3efe6 0%, #e1d8c8 100%);
+  color: #1f1f1f;
+}
+
+.landing-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+.landing-card {
+  width: min(560px, calc(100vw - 48px));
+  background: rgba(255, 250, 242, 0.94);
+  border: 1px solid rgba(76, 61, 43, 0.16);
+  border-radius: 20px;
+  padding: 28px;
+  box-shadow: 0 18px 42px rgba(68, 55, 34, 0.14);
+}
+
+.review-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  gap: 20px;
+  padding: 20px;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 16px 20px 0;
+}
+
+.player-panel,
+.question-card {
+  background: rgba(255, 249, 240, 0.92);
+  border: 1px solid rgba(79, 55, 21, 0.14);
+  border-radius: 18px;
+  box-shadow: 0 10px 24px rgba(79, 55, 21, 0.08);
+}
+
+.player-panel {
+  padding: 16px;
+}
+
+.viewer-shell {
+  position: relative;
+  width: 100%;
+  min-height: 420px;
+  background: #1a1a1a;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+#frame-image,
+#overlay-canvas {
+  width: 100%;
+  display: block;
+}
+
+#overlay-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.playback-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 14px;
+}
+
+.side-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.question-card {
+  padding: 14px;
+}
+
+.primary-btn,
+.choice-btn {
+  background: #8d5b2a;
+  color: #fffdf8;
+  border: none;
+  border-radius: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.secondary-link {
+  color: #6b4b23;
+}
+
+.choice-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.choice-btn.is-selected {
+  background: #214f74;
+}
+
+.choice-btn.is-muted {
+  background: #b7ab98;
+}
+
+.candidate-list {
+  display: grid;
+  gap: 10px;
+}
+
+.candidate-card {
+  border: 1px solid rgba(79, 55, 21, 0.14);
+  border-radius: 14px;
+  padding: 10px;
+  background: #fffaf2;
+}
+
+.candidate-card img {
+  width: 100%;
+  border-radius: 10px;
+  display: block;
+}
+
+.candidate-card h3 {
+  margin: 10px 0 6px;
+  font-size: 15px;
+}
+
+.meta-note {
+  color: #655741;
+  font-size: 13px;
+}
+
+.full-width {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.hidden {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .review-layout {
+    grid-template-columns: 1fr;
+  }
+}

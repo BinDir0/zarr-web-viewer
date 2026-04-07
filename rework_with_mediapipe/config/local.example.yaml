@@ -1,0 +1,4 @@
+paths:
+  mediapipe_repo_root: /root/mediapipe
+  manopth_root: /root/manopth
+  mano_models_root: /root/manopth/mano/models

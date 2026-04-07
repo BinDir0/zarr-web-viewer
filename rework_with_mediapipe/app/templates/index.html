@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Self Hand Review</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body class="landing-page">
+    <main class="landing-card">
+      <h1>Self Hand Review</h1>
+      <p>离线预处理完成后，外包只需要选择 wearer-left / wearer-right / none。</p>
+      {% if next_clip_id %}
+      <a class="primary-btn" href="{{ url_for('clip_page', clip_id=next_clip_id) }}">开始审核 Clip {{ next_clip_id }}</a>
+      {% else %}
+      <div class="empty-note">当前没有 ready_for_review 的 clip。</div>
+      {% endif %}
+      <div class="meta-note">最近已审核数量：{{ reviewed_count }}</div>
+    </main>
+  </body>
+</html>
