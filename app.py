@@ -44,6 +44,8 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     SANITY_RESULTS_FRAME_MAX_WIDTH = int(config.get("sanity_results_frame_max_width", 360))
     SANITY_RESULTS_SAMPLE_EVERY_N = max(1, int(config.get("sanity_results_sample_every_n", 30)))
     SANITY_RESULTS_SAMPLE_SEED = str(config.get("sanity_results_sample_seed", "sanity-results-fixed-v1"))
+    SANITY_RESULTS_PREWARM_RENDER_CACHE = bool(config.get("sanity_results_prewarm_render_cache", True))
+    SANITY_RESULTS_PREWARM_BATCH_SIZE = max(1, int(config.get("sanity_results_prewarm_batch_size", 256)))
     sanity_results_cache_dir = config.get("sanity_results_cache_dir", "/DATA/guantianrui/zarr-web-viewer-cache")
     SANITY_RESULTS_CACHE_DIR = Path(str(sanity_results_cache_dir))
     FACTORY_EPISODES_CACHE_FILE = Path(
@@ -79,7 +81,7 @@ _SANITY_RESULTS_EPISODES: Optional[List[Dict]] = None
 _SANITY_RESULTS_INDEX: Optional[Dict[str, Any]] = None
 _SANITY_RESULTS_SIGNATURE: Optional[tuple] = None
 EPISODE_CACHE_VERSION = 1
-SANITY_RESULTS_INDEX_CACHE_VERSION = 2
+SANITY_RESULTS_INDEX_CACHE_VERSION = 3
 SANITY_RESULTS_RENDER_CACHE_VERSION = 1
 _FACTORY_SCAN_LOCK = Lock()
 _SANITY_RESULTS_LOCK = Lock()
@@ -361,6 +363,8 @@ def scan_sanity_results_index(force_rescan: bool = False) -> Dict[str, Any]:
                 if (
                     cached.get("version") == SANITY_RESULTS_INDEX_CACHE_VERSION
                     and cached.get("signature") == signature
+                    and cached.get("sample_every_n") == SANITY_RESULTS_SAMPLE_EVERY_N
+                    and cached.get("sample_seed") == SANITY_RESULTS_SAMPLE_SEED
                     and isinstance(cached.get("index"), dict)
                 ):
                     _SANITY_RESULTS_INDEX = cached["index"]
@@ -499,6 +503,8 @@ def scan_sanity_results_index(force_rescan: bool = False) -> Dict[str, Any]:
             {
                 "version": SANITY_RESULTS_INDEX_CACHE_VERSION,
                 "signature": signature,
+                "sample_every_n": SANITY_RESULTS_SAMPLE_EVERY_N,
+                "sample_seed": SANITY_RESULTS_SAMPLE_SEED,
                 "index": index,
             },
         )
@@ -887,6 +893,11 @@ def _load_cached_image_data_url(entry: Dict[str, Any], max_width: int) -> Option
     return None
 
 
+def _has_cached_rendered_image(entry: Dict[str, Any], max_width: int) -> bool:
+    webp_path, jpg_path = _get_results_render_cache_paths(entry, max_width)
+    return webp_path.exists() or jpg_path.exists()
+
+
 def _save_cached_rendered_image(entry: Dict[str, Any], max_width: int, encoded_bytes: bytes, use_webp: bool) -> None:
     webp_path, jpg_path = _get_results_render_cache_paths(entry, max_width)
     target_path = webp_path if use_webp else jpg_path
@@ -993,18 +1004,74 @@ def _read_raw_member_from_tar_file(fp, offset_and_size: Tuple[int, int]) -> byte
     return fp.read(size)
 
 
+def _render_results_frame_from_raw(
+    entry: Dict[str, Any],
+    raw: bytes,
+    max_width: int,
+    return_data_url: bool,
+) -> Optional[str]:
+    try:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+        for box in entry.get("normalized_boxes", []):
+            cx = float(box["cx"]) * w
+            cy = float(box["cy"]) * h
+            bw = float(box["w"]) * w
+            bh = float(box["h"]) * h
+            x1 = cx - bw / 2.0
+            y1 = cy - bh / 2.0
+            x2 = cx + bw / 2.0
+            y2 = cy + bh / 2.0
+            score = float(box.get("score", 0.0))
+            handedness = int(box.get("side_label", 0))
+            if handedness == 0:
+                color, label = "#00BFFF", f"L {score:.2f}"
+            else:
+                color, label = "#FF4444", f"R {score:.2f}"
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=BOX_OUTLINE_WIDTH)
+            draw.text((x1 + 2, max(0, y1 - 16)), label, fill=color)
+
+        if w > max_width:
+            img = img.resize((max_width, int(h * max_width / w)), Image.Resampling.BILINEAR)
+
+        buf = io.BytesIO()
+        try:
+            img.save(buf, format="WEBP", quality=78, method=4)
+            encoded = buf.getvalue()
+            _save_cached_rendered_image(entry, max_width, encoded, use_webp=True)
+            if return_data_url:
+                return f"data:image/webp;base64,{base64.b64encode(encoded).decode('utf-8')}"
+            return None
+        except Exception:
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=72)
+            encoded = buf.getvalue()
+            _save_cached_rendered_image(entry, max_width, encoded, use_webp=False)
+            if return_data_url:
+                return f"data:image/jpeg;base64,{base64.b64encode(encoded).decode('utf-8')}"
+            return None
+    except Exception as e:
+        print(f"⚠ 解码 results 帧失败 ({entry.get('member_name')}): {e}", flush=True)
+        return None
+
+
 def load_episode_frames_from_results(
     frame_entries: List[Dict],
     max_width: int = SANITY_RESULTS_FRAME_MAX_WIDTH,
+    return_data_urls: bool = True,
 ) -> List[Optional[str]]:
     """从 results.jsonl 提供的 tar_path/member_name 直接加载帧并绘制检测框。"""
     results: List[Optional[str]] = [None] * len(frame_entries)
     misses_by_tar: Dict[str, List[Dict[str, Any]]] = {}
 
     for idx, entry in enumerate(frame_entries):
-        cached = _load_cached_image_data_url(entry, max_width)
-        if cached is not None:
-            results[idx] = cached
+        if return_data_urls:
+            cached = _load_cached_image_data_url(entry, max_width)
+            if cached is not None:
+                results[idx] = cached
+                continue
+        elif _has_cached_rendered_image(entry, max_width):
             continue
         misses_by_tar.setdefault(entry["tar_path"], []).append({"idx": idx, "entry": entry})
 
@@ -1030,52 +1097,58 @@ def load_episode_frames_from_results(
             print(f"⚠ 读取 results tar 失败 ({tar_path}): {e}", flush=True)
 
     for idx, entry in enumerate(frame_entries):
-        if results[idx] is not None:
+        if return_data_urls and results[idx] is not None:
             continue
         raw = raw_frame_data.get(idx)
         if raw is None:
             continue
-        try:
-            img = Image.open(io.BytesIO(raw)).convert("RGB")
-            draw = ImageDraw.Draw(img)
-            w, h = img.size
-            for box in entry.get("normalized_boxes", []):
-                cx = float(box["cx"]) * w
-                cy = float(box["cy"]) * h
-                bw = float(box["w"]) * w
-                bh = float(box["h"]) * h
-                x1 = cx - bw / 2.0
-                y1 = cy - bh / 2.0
-                x2 = cx + bw / 2.0
-                y2 = cy + bh / 2.0
-                score = float(box.get("score", 0.0))
-                handedness = int(box.get("side_label", 0))
-                if handedness == 0:
-                    color, label = "#00BFFF", f"L {score:.2f}"
-                else:
-                    color, label = "#FF4444", f"R {score:.2f}"
-                draw.rectangle([x1, y1, x2, y2], outline=color, width=BOX_OUTLINE_WIDTH)
-                draw.text((x1 + 2, max(0, y1 - 16)), label, fill=color)
-
-            if w > max_width:
-                img = img.resize((max_width, int(h * max_width / w)), Image.Resampling.BILINEAR)
-
-            buf = io.BytesIO()
-            try:
-                img.save(buf, format="WEBP", quality=78, method=4)
-                encoded = buf.getvalue()
-                _save_cached_rendered_image(entry, max_width, encoded, use_webp=True)
-                results[idx] = f"data:image/webp;base64,{base64.b64encode(encoded).decode('utf-8')}"
-            except Exception:
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=72)
-                encoded = buf.getvalue()
-                _save_cached_rendered_image(entry, max_width, encoded, use_webp=False)
-                results[idx] = f"data:image/jpeg;base64,{base64.b64encode(encoded).decode('utf-8')}"
-        except Exception as e:
-            print(f"⚠ 解码 results 帧失败 ({entry.get('member_name')}): {e}", flush=True)
+        results[idx] = _render_results_frame_from_raw(entry, raw, max_width, return_data_url=return_data_urls)
 
     return results
+
+
+def prewarm_sanity_results_render_cache(results_index: Dict[str, Any]) -> None:
+    frames = results_index.get("frames", [])
+    if not frames or not SANITY_RESULTS_PREWARM_RENDER_CACHE:
+        return
+
+    missing_indices = [
+        idx for idx, entry in enumerate(frames)
+        if not _has_cached_rendered_image(entry, SANITY_RESULTS_FRAME_MAX_WIDTH)
+    ]
+    total_missing = len(missing_indices)
+    if total_missing == 0:
+        print("✓ sanity results 渲染缓存已命中，无需额外预热", flush=True)
+        return
+
+    print(
+        "开始预热 sanity results 渲染缓存: "
+        f"{total_missing}/{len(frames)} 帧待渲染",
+        flush=True,
+    )
+    started_at = time.time()
+    last_print = started_at
+    warmed = 0
+
+    for start in range(0, total_missing, SANITY_RESULTS_PREWARM_BATCH_SIZE):
+        batch_indices = missing_indices[start : start + SANITY_RESULTS_PREWARM_BATCH_SIZE]
+        batch_entries = [frames[idx] for idx in batch_indices]
+        load_episode_frames_from_results(
+            batch_entries,
+            max_width=SANITY_RESULTS_FRAME_MAX_WIDTH,
+            return_data_urls=False,
+        )
+        warmed += len(batch_entries)
+        now = time.time()
+        if now - last_print >= SANITY_RESULTS_PROGRESS_INTERVAL_SEC or warmed == total_missing:
+            pct = warmed * 100.0 / total_missing
+            print(
+                "[sanity render prewarm] "
+                f"{pct:5.1f}% | frames {warmed:,}/{total_missing:,} | "
+                f"elapsed {now - started_at:.1f}s",
+                flush=True,
+            )
+            last_print = now
 
 
 def load_episode_frames_from_raw_buildai(
@@ -2759,8 +2832,10 @@ def main():
     should_preload = (not USE_RELOADER) or (os.environ.get("WERKZEUG_RUN_MAIN") == "true")
     if should_preload:
         # sanity-check 若配置了 results.jsonl，则优先预热该缓存；否则走原 factory 缓存。
-        if scan_sanity_results_index().get("frames"):
+        results_index = scan_sanity_results_index()
+        if results_index.get("frames"):
             print("✓ 已预热 sanity results.jsonl 缓存")
+            prewarm_sanity_results_render_cache(results_index)
         else:
             scan_factory_episodes()
     else:

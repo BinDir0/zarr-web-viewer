@@ -10,6 +10,8 @@ sanity_results_globs:
 sanity_results_max_frames_per_episode: 8
 sanity_results_sample_every_n: 30
 sanity_results_sample_seed: sanity-results-fixed-v1
+sanity_results_prewarm_render_cache: true
+sanity_results_prewarm_batch_size: 256
 
 # 旧 BuildAI 10k raw 数据集（用于 rework 合并旧 flaw 队列）
 legacy_buildai_dataset_root: /share_data/lvjianan/datasets/BuildAI-processed
