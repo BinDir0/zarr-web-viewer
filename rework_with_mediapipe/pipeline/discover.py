@@ -57,6 +57,32 @@ def _load_annotation_rows(db_path: Path) -> List[sqlite3.Row]:
         conn.close()
 
 
+def _load_source_rows(cfg: Dict, local_db_path: Path) -> List[Dict]:
+    """Load dirty rows from the parent overlay db and optional source dbs.
+
+    This mirrors the practical zarr-viewer setup where the local annotations.db
+    may only store overlays while the real BAD_FRAMES source queue lives in
+    source_factory_annotations_db or legacy_buildai_annotations_db.
+    """
+    candidates = [
+        local_db_path,
+        Path(str(cfg.get("source_factory_annotations_db"))) if cfg.get("source_factory_annotations_db") else None,
+        Path(str(cfg.get("legacy_buildai_annotations_db"))) if cfg.get("legacy_buildai_annotations_db") else None,
+    ]
+    merged: Dict[str, Dict] = {}
+    for candidate in candidates:
+        if candidate is None or not candidate.exists():
+            continue
+        rows = _load_annotation_rows(candidate)
+        for row in rows:
+            row_dict = dict(row)
+            # Prefer local overlay rows when episode_id overlaps.
+            merged.setdefault(str(row_dict["episode_id"]), row_dict)
+            if candidate == local_db_path:
+                merged[str(row_dict["episode_id"])] = row_dict
+    return [merged[key] for key in sorted(merged.keys())]
+
+
 def _load_factory_lookup(zarr_viewer_config: Path) -> Dict[str, EpisodeRef]:
     cfg = _read_yaml(zarr_viewer_config)
     factory_base = cfg.get("factory_base")
@@ -183,15 +209,15 @@ def discover_dirty_clips(
 ) -> List[ClipRef]:
     cfg = _read_yaml(zarr_viewer_config)
     factory_lookup = _load_factory_lookup(zarr_viewer_config)
-    rows = _load_annotation_rows(zarr_viewer_db)
+    rows = _load_source_rows(cfg, zarr_viewer_db)
     clips: List[ClipRef] = []
     for row in rows:
         bad_frames = _parse_bad_frames(str(row["content"]))
         if not bad_frames:
             continue
-        episode = factory_lookup.get(row["episode_id"])
+        episode = factory_lookup.get(str(row["episode_id"]))
         if episode is None:
-            episode = _resolve_legacy_episode(row["episode_id"], cfg, row)
+            episode = _resolve_legacy_episode(str(row["episode_id"]), cfg, row)
         if episode is None or episode.num_frames <= 0:
             continue
         spans = _merge_spans(bad_frames, clip_merge_gap)
