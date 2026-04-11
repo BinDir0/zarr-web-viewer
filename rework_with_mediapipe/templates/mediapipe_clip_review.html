@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MediaPipe Clip Review</title>
+    <link rel="stylesheet" href="{{ url_for('mediapipe_review.static', filename='mediapipe_review.css') }}">
+  </head>
+  <body class="mpr-page">
+    <div id="mpr-review-app" data-clip-id="{{ clip_id }}">
+      <header class="mpr-header">
+        <a class="mpr-link" href="{{ url_for('mediapipe_review.dashboard') }}">返回 Dashboard</a>
+        <div id="mpr-title">Loading clip {{ clip_id }}...</div>
+      </header>
+      <main class="mpr-review-layout">
+        <section class="mpr-player-card">
+          <div class="mpr-viewer-shell">
+            <img id="mpr-frame-image" alt="frame">
+            <canvas id="mpr-overlay-canvas"></canvas>
+          </div>
+          <div class="mpr-playback-row">
+            <button id="mpr-play-toggle" class="mpr-btn mpr-btn-primary">播放</button>
+            <input id="mpr-frame-slider" type="range" min="0" max="0" value="0">
+            <span id="mpr-frame-label">0 / 0</span>
+          </div>
+        </section>
+        <aside class="mpr-side-panel">
+          <section class="mpr-card">
+            <h2>佩戴者左手</h2>
+            <div id="mpr-left-choices"></div>
+          </section>
+          <section class="mpr-card">
+            <h2>佩戴者右手</h2>
+            <div id="mpr-right-choices"></div>
+          </section>
+          <section class="mpr-card">
+            <h2>候选轨迹</h2>
+            <div id="mpr-candidate-cards" class="mpr-candidate-list"></div>
+          </section>
+          <section id="mpr-merge-card" class="mpr-card mpr-hidden">
+            <h2>补充问题</h2>
+            <div id="mpr-merge-questions"></div>
+          </section>
+          <section class="mpr-card">
+            <label for="mpr-review-confidence">审核置信度</label>
+            <select id="mpr-review-confidence">
+              <option value="high">high</option>
+              <option value="normal" selected>normal</option>
+              <option value="low">low</option>
+            </select>
+            <button id="mpr-submit-review" class="mpr-btn mpr-btn-primary mpr-full-width">提交</button>
+            <div id="mpr-submit-message" class="mpr-meta-note"></div>
+          </section>
+        </aside>
+      </main>
+    </div>
+    <script src="{{ url_for('mediapipe_review.static', filename='mediapipe_review.js') }}"></script>
+  </body>
+</html>

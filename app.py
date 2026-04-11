@@ -8,7 +8,7 @@ import pickle
 import re
 import sqlite3
 import time
-from threading import Lock
+from threading import Lock, Thread
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +18,8 @@ import numpy as np
 import yaml
 from flask import Flask, g, jsonify, redirect, render_template, request
 from PIL import Image, ImageDraw
+
+from rework_with_mediapipe import init_runtime as init_mediapipe_review_runtime, mediapipe_review_bp
 
 # 加载配置
 with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
@@ -44,6 +46,12 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
     SANITY_RESULTS_FRAME_MAX_WIDTH = int(config.get("sanity_results_frame_max_width", 360))
     SANITY_RESULTS_SAMPLE_EVERY_N = max(1, int(config.get("sanity_results_sample_every_n", 30)))
     SANITY_RESULTS_SAMPLE_SEED = str(config.get("sanity_results_sample_seed", "sanity-results-fixed-v1"))
+    SANITY_RESULTS_PREWARM_RENDER_CACHE = bool(config.get("sanity_results_prewarm_render_cache", True))
+    SANITY_RESULTS_BACKGROUND_PREWARM_RENDER_CACHE = bool(
+        config.get("sanity_results_background_prewarm_render_cache", True)
+    )
+    SANITY_RESULTS_PRIORITY_PREWARM_FRAMES = max(0, int(config.get("sanity_results_priority_prewarm_frames", 1024)))
+    SANITY_RESULTS_PREWARM_BATCH_SIZE = max(1, int(config.get("sanity_results_prewarm_batch_size", 256)))
     sanity_results_cache_dir = config.get("sanity_results_cache_dir", "/DATA/guantianrui/zarr-web-viewer-cache")
     SANITY_RESULTS_CACHE_DIR = Path(str(sanity_results_cache_dir))
     FACTORY_EPISODES_CACHE_FILE = Path(
@@ -53,6 +61,7 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
         )
     )
     SQLITE_BUSY_TIMEOUT_MS = int(config.get("sqlite_busy_timeout_ms", 15000))
+    MP_REVIEW_REPLACE_HOME = bool(config.get("mediapipe_review", {}).get("replace_home", True))
 
 DB_PATH = Path(__file__).parent / "annotations.db"
 
@@ -61,6 +70,7 @@ app = Flask(
     static_folder="static",
     template_folder="templates",
 )
+app.register_blueprint(mediapipe_review_bp)
 
 # 启用响应压缩
 try:
@@ -91,6 +101,8 @@ _SANITY_RESULTS_CACHE_ROOT: Optional[Path] = None
 _SANITY_RESULTS_CACHE_ROOT_LOCK = Lock()
 _RESULTS_TAR_INDEX_CACHE: Dict[str, Dict[str, Any]] = {}
 _RESULTS_TAR_INDEX_LOCK = Lock()
+_SANITY_RESULTS_PREWARM_THREAD: Optional[Thread] = None
+_SANITY_RESULTS_PREWARM_THREAD_LOCK = Lock()
 
 
 def _load_episode_cache(cache_file: Path, cache_key: Dict) -> Optional[List[Dict]]:
@@ -1077,7 +1089,95 @@ def load_episode_frames_from_results(
 
     return results
 
+def prewarm_sanity_results_render_cache(
+    results_index: Dict[str, Any],
+    max_frames: Optional[int] = None,
+    phase_name: str = "background",
+) -> None:
+    frames = results_index.get("frames", [])
+    if not frames or not SANITY_RESULTS_PREWARM_RENDER_CACHE:
+        return
 
+    missing_entries = [
+        entry for entry in frames
+        if not _has_cached_rendered_image(entry, SANITY_RESULTS_FRAME_MAX_WIDTH)
+    ]
+    if max_frames is not None and max_frames >= 0:
+        missing_entries = missing_entries[:max_frames]
+
+    total_missing = len(missing_entries)
+    if total_missing == 0:
+        print(f"✓ sanity results {phase_name} 渲染缓存已命中，无需额外预热", flush=True)
+        return
+
+    print(
+        f"开始预热 sanity results {phase_name} 渲染缓存: "
+        f"{total_missing}/{len(frames)} 帧待渲染",
+        flush=True,
+    )
+    started_at = time.time()
+    last_print = started_at
+    warmed = 0
+
+    for start in range(0, total_missing, SANITY_RESULTS_PREWARM_BATCH_SIZE):
+        batch_entries = missing_entries[start : start + SANITY_RESULTS_PREWARM_BATCH_SIZE]
+        load_episode_frames_from_results(
+            batch_entries,
+            max_width=SANITY_RESULTS_FRAME_MAX_WIDTH,
+            return_data_urls=False,
+        )
+        warmed += len(batch_entries)
+        now = time.time()
+        if now - last_print >= SANITY_RESULTS_PROGRESS_INTERVAL_SEC or warmed == total_missing:
+            pct = warmed * 100.0 / total_missing
+            print(
+                f"[sanity render prewarm/{phase_name}] "
+                f"{pct:5.1f}% | frames {warmed:,}/{total_missing:,} | "
+                f"elapsed {now - started_at:.1f}s",
+                flush=True,
+            )
+            last_print = now
+
+
+def start_sanity_results_render_cache_prewarm(results_index: Dict[str, Any]) -> None:
+    global _SANITY_RESULTS_PREWARM_THREAD
+    if not results_index.get("frames") or not SANITY_RESULTS_PREWARM_RENDER_CACHE:
+        return
+
+    if not SANITY_RESULTS_BACKGROUND_PREWARM_RENDER_CACHE:
+        prewarm_sanity_results_render_cache(
+            results_index,
+            max_frames=SANITY_RESULTS_PRIORITY_PREWARM_FRAMES or None,
+            phase_name="startup",
+        )
+        return
+
+    with _SANITY_RESULTS_PREWARM_THREAD_LOCK:
+        if _SANITY_RESULTS_PREWARM_THREAD is not None and _SANITY_RESULTS_PREWARM_THREAD.is_alive():
+            print("✓ sanity results 渲染缓存后台预热已在进行中", flush=True)
+            return
+
+        def _worker() -> None:
+            global _SANITY_RESULTS_PREWARM_THREAD
+            try:
+                if SANITY_RESULTS_PRIORITY_PREWARM_FRAMES > 0:
+                    prewarm_sanity_results_render_cache(
+                        results_index,
+                        max_frames=SANITY_RESULTS_PRIORITY_PREWARM_FRAMES,
+                        phase_name="priority",
+                    )
+                prewarm_sanity_results_render_cache(results_index, phase_name="background")
+            finally:
+                with _SANITY_RESULTS_PREWARM_THREAD_LOCK:
+                    _SANITY_RESULTS_PREWARM_THREAD = None
+
+        _SANITY_RESULTS_PREWARM_THREAD = Thread(
+            target=_worker,
+            name="sanity-results-prewarm",
+            daemon=True,
+        )
+        _SANITY_RESULTS_PREWARM_THREAD.start()
+        print("✓ 已启动 sanity results 渲染缓存后台预热线程", flush=True)
 def load_episode_frames_from_raw_buildai(
     crop_dir: str,
     frame_indices: List[int],
@@ -1785,6 +1885,13 @@ def _finalize_results_episode_annotations(
 
 @app.route("/")
 def index():
+    if MP_REVIEW_REPLACE_HOME:
+        return redirect("/mediapipe")
+    return render_template("sanity_check.html")
+
+
+@app.route("/legacy")
+def legacy_index():
     return render_template("sanity_check.html")
 
 
@@ -2756,13 +2863,19 @@ def api_sanity_check_submit():
 
 def main():
     init_db()
+    init_mediapipe_review_runtime()
     should_preload = (not USE_RELOADER) or (os.environ.get("WERKZEUG_RUN_MAIN") == "true")
     if should_preload:
-        # sanity-check 若配置了 results.jsonl，则优先预热该缓存；否则走原 factory 缓存。
-        if scan_sanity_results_index().get("frames"):
-            print("✓ 已预热 sanity results.jsonl 缓存")
+        if MP_REVIEW_REPLACE_HOME:
+            print("默认首页已切到 MediaPipe review，跳过旧 sanity/rework 启动预热")
         else:
-            scan_factory_episodes()
+            # sanity-check 若配置了 results.jsonl，则优先预热该缓存；否则走原 factory 缓存。
+            results_index = scan_sanity_results_index()
+            if results_index.get("frames"):
+                print("✓ 已预热 sanity results.jsonl 缓存")
+                start_sanity_results_render_cache_prewarm(results_index)
+            else:
+                scan_factory_episodes()
     else:
         print("跳过 reloader 父进程中的 factory 预热，等待实际服务进程启动")
     print(f"启动服务器在端口 {SERVER_PORT}")

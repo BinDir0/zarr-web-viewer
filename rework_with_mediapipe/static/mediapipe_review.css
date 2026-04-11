@@ -1,0 +1,241 @@
+body.mpr-page {
+  margin: 0;
+  font-family: "IBM Plex Sans", "Noto Sans SC", sans-serif;
+  background: linear-gradient(180deg, #efe7da 0%, #ddd4c6 100%);
+  color: #231f1a;
+}
+
+.mpr-shell {
+  width: min(1280px, calc(100vw - 40px));
+  margin: 24px auto 40px;
+  display: grid;
+  gap: 18px;
+}
+
+.mpr-hero,
+.mpr-card,
+.mpr-player-card {
+  background: rgba(255, 250, 242, 0.95);
+  border: 1px solid rgba(84, 61, 30, 0.16);
+  border-radius: 20px;
+  box-shadow: 0 14px 30px rgba(59, 41, 18, 0.08);
+}
+
+.mpr-hero {
+  padding: 24px;
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.mpr-kicker {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #8d5b2a;
+}
+
+.mpr-actions,
+.mpr-job-row,
+.mpr-choice-group,
+.mpr-badges,
+.mpr-inline {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.mpr-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.mpr-card {
+  padding: 18px;
+}
+
+.mpr-count-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.mpr-count-item {
+  border-radius: 14px;
+  padding: 12px;
+  background: #fffaf2;
+  border: 1px solid rgba(84, 61, 30, 0.12);
+}
+
+.mpr-count-key {
+  color: #6d5b48;
+  font-size: 13px;
+}
+
+.mpr-count-value {
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.mpr-badge {
+  padding: 8px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  border: 1px solid transparent;
+}
+
+.mpr-badge.ok {
+  background: rgba(12, 117, 90, 0.12);
+  border-color: rgba(12, 117, 90, 0.24);
+  color: #0f766e;
+}
+
+.mpr-badge.bad {
+  background: rgba(185, 28, 28, 0.12);
+  border-color: rgba(185, 28, 28, 0.2);
+  color: #b91c1c;
+}
+
+.mpr-btn {
+  border: none;
+  border-radius: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+  text-decoration: none;
+  font: inherit;
+}
+
+.mpr-btn-primary {
+  background: #8d5b2a;
+  color: #fffdf8;
+}
+
+.mpr-btn-secondary {
+  background: #e9dfd1;
+  color: #4b3a28;
+}
+
+.mpr-choice-btn.is-selected {
+  background: #214f74;
+  color: #fff;
+}
+
+.mpr-choice-btn.is-muted {
+  background: #b7ab98;
+}
+
+.mpr-log {
+  min-height: 160px;
+  overflow: auto;
+  border-radius: 14px;
+  background: #201a15;
+  color: #f7efe4;
+  padding: 14px;
+}
+
+.mpr-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px 0;
+}
+
+.mpr-link {
+  color: #6b4b23;
+}
+
+.mpr-review-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  gap: 20px;
+  padding: 20px;
+}
+
+.mpr-player-card {
+  padding: 16px;
+}
+
+.mpr-viewer-shell {
+  position: relative;
+  width: 100%;
+  min-height: 420px;
+  background: #1a1a1a;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+#mpr-frame-image,
+#mpr-overlay-canvas {
+  width: 100%;
+  display: block;
+}
+
+#mpr-overlay-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.mpr-playback-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 14px;
+}
+
+.mpr-side-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mpr-candidate-list {
+  display: grid;
+  gap: 10px;
+}
+
+.mpr-candidate-card {
+  border: 1px solid rgba(79, 55, 21, 0.14);
+  border-radius: 14px;
+  padding: 10px;
+  background: #fffaf2;
+}
+
+.mpr-candidate-card img {
+  width: 100%;
+  border-radius: 10px;
+  display: block;
+}
+
+.mpr-meta-note {
+  color: #655741;
+  font-size: 13px;
+}
+
+.mpr-full-width {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.mpr-hidden {
+  display: none;
+}
+
+.mpr-empty {
+  color: #6d5b48;
+}
+
+@media (max-width: 1100px) {
+  .mpr-grid,
+  .mpr-review-layout,
+  .mpr-hero {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
+
+  .mpr-shell {
+    width: calc(100vw - 24px);
+  }
+}

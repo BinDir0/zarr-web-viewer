@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MediaPipe Review Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('mediapipe_review.static', filename='mediapipe_review.css') }}">
+  </head>
+  <body class="mpr-page">
+    <main class="mpr-shell" id="mpr-dashboard">
+      <section class="mpr-hero">
+        <div>
+          <div class="mpr-kicker">Ego Hand Recovery</div>
+          <h1>MediaPipe Clip Review</h1>
+          <p>从当前主站标注库发现框相关问题，离线预计算候选轨迹，审核后做 MANO 拟合并导出 JSON/NPZ 中间结果。</p>
+        </div>
+        <div class="mpr-actions">
+          {% if summary.next_clip_id %}
+          <a class="mpr-btn mpr-btn-primary" href="{{ url_for('mediapipe_review.clip_page', clip_id=summary.next_clip_id) }}">开始审核 Clip {{ summary.next_clip_id }}</a>
+          {% else %}
+          <span class="mpr-empty">当前没有 ready_for_review 的 clip</span>
+          {% endif %}
+          <a class="mpr-btn mpr-btn-secondary" href="/sanity-check">旧 Sanity 页</a>
+          <a class="mpr-btn mpr-btn-secondary" href="/rework">旧 Rework 页</a>
+          <a class="mpr-btn mpr-btn-secondary" href="/legacy">旧首页</a>
+        </div>
+      </section>
+
+      <section class="mpr-grid">
+        <article class="mpr-card">
+          <h2>队列概览</h2>
+          <div id="summaryCounts" class="mpr-count-grid">
+            {% for key, value in summary.counts.items() %}
+            <div class="mpr-count-item">
+              <div class="mpr-count-key">{{ key }}</div>
+              <div class="mpr-count-value">{{ value }}</div>
+            </div>
+            {% endfor %}
+          </div>
+        </article>
+
+        <article class="mpr-card">
+          <h2>依赖状态</h2>
+          <div id="dependencyStatus" class="mpr-badges">
+            {% for key, value in summary.dependencies.items() %}
+            <span class="mpr-badge {{ 'ok' if value else 'bad' }}">{{ key }}: {{ 'ok' if value else 'missing' }}</span>
+            {% endfor %}
+          </div>
+        </article>
+      </section>
+
+      <section class="mpr-card">
+        <div class="mpr-section-head">
+          <h2>流水线操作</h2>
+          <div class="mpr-inline">
+            <label>limit</label>
+            <input id="jobLimit" type="number" min="1" value="25">
+          </div>
+        </div>
+        <div class="mpr-job-row">
+          <button class="mpr-btn mpr-btn-primary" data-job="discover">1. Discover</button>
+          <button class="mpr-btn mpr-btn-primary" data-job="process">2. Precompute</button>
+          <button class="mpr-btn mpr-btn-primary" data-job="fit">3. Fit MANO</button>
+          <button class="mpr-btn mpr-btn-primary" data-job="export">4. Export Manifest</button>
+        </div>
+        <pre id="jobOutput" class="mpr-log">等待操作…</pre>
+      </section>
+
+      <section class="mpr-card">
+        <h2>运行路径</h2>
+        <div id="pathInfo" class="mpr-paths">
+          {% for key, value in summary.paths.items() %}
+          <div><strong>{{ key }}</strong>: {{ value }}</div>
+          {% endfor %}
+        </div>
+      </section>
+    </main>
+    <script src="{{ url_for('mediapipe_review.static', filename='mediapipe_review.js') }}"></script>
+  </body>
+</html>

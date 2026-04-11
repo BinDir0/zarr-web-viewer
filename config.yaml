@@ -10,6 +10,10 @@ sanity_results_globs:
 sanity_results_max_frames_per_episode: 8
 sanity_results_sample_every_n: 30
 sanity_results_sample_seed: sanity-results-fixed-v1
+sanity_results_prewarm_render_cache: true
+sanity_results_background_prewarm_render_cache: true
+sanity_results_priority_prewarm_frames: 1024
+sanity_results_prewarm_batch_size: 256
 
 # 旧 BuildAI 10k raw 数据集（用于 rework 合并旧 flaw 队列）
 legacy_buildai_dataset_root: /share_data/lvjianan/datasets/BuildAI-processed
@@ -22,3 +26,43 @@ legacy_buildai_annotations_db: /share_data/guantianrui/EgoYOLO/annotations.db
 server_port: 9472
 debug_mode: true
 use_reloader: false
+
+mediapipe_review:
+  replace_home: true
+  db_path: /root/zarr-viewer/mediapipe_review.db
+  artifacts_dir: /root/zarr-viewer/mediapipe_review_artifacts
+  source_annotations_db: /root/zarr-viewer/annotations.db
+  source_config_path: /root/zarr-viewer/config.yaml
+  hand_landmarker_task: /root/mediapipe/hand_landmarker.task
+  mediapipe_repo_root: /root/mediapipe
+  manopth_root: /root/manopth
+  mano_models_root: /root/manopth/mano/model
+  clip_context_frames: 60
+  clip_merge_gap: 15
+  max_clip_frames: 240
+  overlap_frames: 30
+  preview_width: 640
+  frame_stride_for_cards: 3
+  detector_max_hands: 4
+  min_detection_confidence: 0.35
+  min_presence_confidence: 0.35
+  min_tracking_confidence: 0.35
+  track_max_gap: 2
+  min_chain_frames: 5
+  top_k_chains: 4
+  fit_device: cpu
+  fit_stage1_steps: 80
+  fit_stage2_steps: 150
+  fit_stage3_steps: 200
+  fit_learning_rate: 0.03
+  fit_reprojection_weight: 5.0
+  fit_relative_3d_weight: 2.0
+  fit_temporal_weight: 0.05
+  fit_shape_weight: 0.001
+  fit_pose_prior_weight: 0.001
+  mano_use_pca: true
+  mano_ncomps: 15
+  mano_center_idx: 0
+  mano_flat_hand_mean: true
+  max_median_reproj_error_px: 18.0
+  max_p95_reproj_error_px: 40.0
