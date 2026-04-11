@@ -29,14 +29,14 @@ use_reloader: false
 
 mediapipe_review:
   replace_home: true
-  db_path: /root/zarr-viewer/mediapipe_review.db
-  artifacts_dir: /root/zarr-viewer/mediapipe_review_artifacts
-  source_annotations_db: /root/zarr-viewer/annotations.db
-  source_config_path: /root/zarr-viewer/config.yaml
-  hand_landmarker_task: /root/mediapipe/hand_landmarker.task
-  mediapipe_repo_root: /root/mediapipe
-  manopth_root: /root/manopth
-  mano_models_root: /root/manopth/mano/model
+  db_path: /home/guantianrui/rework-viewer/zarr-viewer/mediapipe_review.db
+  artifacts_dir: /home/guantianrui/rework-viewer/zarr-viewer/mediapipe_review_artifacts
+  source_annotations_db: /home/guantianrui/rework-viewer/zarr-viewer/annotations.db
+  source_config_path: /home/guantianrui/rework-viewer/zarr-viewer/config.yaml
+  hand_landmarker_task: /home/guantianrui/mediapipe/hand_landmarker.task
+  mediapipe_repo_root: /home/guantianrui/mediapipe
+  manopth_root: /share_data/guantianrui/manopth
+  mano_models_root: /share_data/guantianrui/manopth/mano/model
   clip_context_frames: 60
   clip_merge_gap: 15
   max_clip_frames: 240
