@@ -16,14 +16,31 @@ from .types import ClipRef, Proposal
 
 
 def _ensure_mediapipe(cfg: MediaPipeReviewConfig):
+    first_error: Exception | None = None
+
+    if cfg.prefer_installed_mediapipe:
+        try:
+            import mediapipe as mp  # type: ignore
+            import mediapipe.tasks.python as mp_python  # type: ignore
+            from mediapipe.tasks.python import vision  # type: ignore
+
+            return mp, mp_python, vision
+        except ImportError as exc:
+            first_error = exc
+
     repo_root = str(cfg.mediapipe_repo_root)
-    if repo_root not in sys.path:
+    if repo_root and repo_root not in sys.path:
         sys.path.insert(0, repo_root)
     try:
         import mediapipe as mp  # type: ignore
         import mediapipe.tasks.python as mp_python  # type: ignore
         from mediapipe.tasks.python import vision  # type: ignore
     except ImportError as exc:
+        if first_error is not None:
+            raise RuntimeError(
+                "缺少可用的 mediapipe Python 依赖。"
+                "已先尝试环境内安装版本，再尝试 mediapipe_repo_root，均失败。"
+            ) from exc
         raise RuntimeError("缺少 mediapipe Python 依赖，无法运行预计算。") from exc
     return mp, mp_python, vision
 

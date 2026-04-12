@@ -83,6 +83,10 @@ class MediaPipeReviewConfig:
         return Path(str(self.raw["hand_landmarker_task"]))
 
     @property
+    def prefer_installed_mediapipe(self) -> bool:
+        return bool(self.raw.get("prefer_installed_mediapipe", True))
+
+    @property
     def mediapipe_repo_root(self) -> Path:
         return Path(str(self.raw["mediapipe_repo_root"]))
 
@@ -234,6 +238,7 @@ def load_config(config_path: str | None = None) -> MediaPipeReviewConfig:
         "factory_base": root_cfg.get("factory_base", ""),
         "factory_start": int(root_cfg.get("factory_start", 1)),
         "factory_end": int(root_cfg.get("factory_end", 0)),
+        "prefer_installed_mediapipe": True,
         "hand_landmarker_task": str(Path("/root/mediapipe/hand_landmarker.task")),
         "mediapipe_repo_root": "/root/mediapipe",
         "manopth_root": "/root/manopth",
