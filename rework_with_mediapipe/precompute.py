@@ -15,6 +15,15 @@ from .frame_sources import make_frame_source
 from .types import ClipRef, Proposal
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _import_mediapipe_modules():
     import mediapipe as mp  # type: ignore
 
@@ -135,14 +144,17 @@ class MediaPipeProposalDetector:
         for det_idx, (norm_lms, world_lms, handedness) in enumerate(
             zip(result.hand_landmarks, result.hand_world_landmarks, result.handedness)
         ):
-            landmarks_2d = [[float(lm.x), float(lm.y), float(getattr(lm, "visibility", 1.0))] for lm in norm_lms]
-            landmarks_3d = [[float(lm.x), float(lm.y), float(lm.z)] for lm in world_lms]
+            landmarks_2d = [
+                [_safe_float(lm.x), _safe_float(lm.y), _safe_float(getattr(lm, "visibility", None), 1.0)]
+                for lm in norm_lms
+            ]
+            landmarks_3d = [[_safe_float(lm.x), _safe_float(lm.y), _safe_float(lm.z)] for lm in world_lms]
             bbox_xyxy = _compute_bbox(landmarks_2d, width, height)
             palm_normal, wrist_frame = _derive_palm_geometry(landmarks_3d)
             handedness_score = 0.0
             if handedness:
                 category = handedness[0]
-                handedness_score = float(category.score)
+                handedness_score = _safe_float(category.score)
                 if str(category.category_name).lower().startswith("left"):
                     handedness_score *= -1.0
             proposals.append(
