@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import math
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 from PIL import Image
 
-from .chains import build_candidate_chains
 from .config import MediaPipeReviewConfig
 from .frame_sources import make_frame_source
 from .types import ClipRef, Proposal
@@ -115,6 +115,105 @@ def _roi_rotation(landmarks_2d: List[List[float]], width: int, height: int) -> f
     return float(math.atan2(float(vec[1]), float(vec[0])))
 
 
+def _resolve_video_running_mode(vision):
+    running_mode = getattr(vision, "RunningMode", None)
+    if running_mode is None:
+        return None
+    return getattr(running_mode, "VIDEO", None)
+
+
+def _role_hint_from_label(label: str) -> str:
+    lowered = str(label).lower()
+    if lowered.startswith("left"):
+        return "mediapipe_left"
+    if lowered.startswith("right"):
+        return "mediapipe_right"
+    return "mediapipe_unknown"
+
+
+def _build_mediapipe_tracks(
+    per_frame_proposals: Dict[int, List[Proposal]],
+    *,
+    bad_frame_indices: List[int],
+    max_gap: int,
+    min_frames: int,
+) -> List[Dict]:
+    bad_frames = {int(item) for item in bad_frame_indices}
+    active: Dict[Tuple[str, int], Dict] = {}
+    finished: List[Dict] = []
+    next_track_id = 0
+
+    for frame_idx in sorted(per_frame_proposals.keys()):
+        proposals = per_frame_proposals[frame_idx]
+        present_keys = set()
+        for proposal in proposals:
+            key = (proposal.handedness_label, int(proposal.side_rank))
+            present_keys.add(key)
+            current = active.get(key)
+            if current is None or frame_idx - int(current["last_frame_idx"]) > max_gap + 1:
+                if current is not None:
+                    finished.append(current)
+                active[key] = {
+                    "track_id": next_track_id,
+                    "handedness_label": proposal.handedness_label,
+                    "side_rank": int(proposal.side_rank),
+                    "proposals": [proposal],
+                    "last_frame_idx": frame_idx,
+                }
+                next_track_id += 1
+                continue
+            current["proposals"].append(proposal)
+            current["last_frame_idx"] = frame_idx
+
+        stale_keys = [
+            key
+            for key, track in active.items()
+            if key not in present_keys and frame_idx - int(track["last_frame_idx"]) > max_gap
+        ]
+        for key in stale_keys:
+            finished.append(active.pop(key))
+
+    finished.extend(active.values())
+    tracks: List[Dict] = []
+    for track in finished:
+        proposals = list(track["proposals"])
+        frames = [int(item.frame_idx) for item in proposals]
+        num_frames = len(frames)
+        intersects_bad_frames = any(frame_idx in bad_frames for frame_idx in frames)
+        if num_frames < max(1, min_frames) and not intersects_bad_frames:
+            continue
+        if num_frames < 2 and not intersects_bad_frames:
+            continue
+        preview_idx = frames[len(frames) // 2]
+        mean_score = float(sum(float(item.score) for item in proposals) / max(1, len(proposals)))
+        tracks.append(
+            {
+                "track_id": int(track["track_id"]),
+                "role_hint": _role_hint_from_label(track["handedness_label"]),
+                "score": float(num_frames) + mean_score + (3.0 if intersects_bad_frames else 0.0),
+                "start_frame": min(frames),
+                "end_frame": max(frames),
+                "num_frames": num_frames,
+                "preview_frame": preview_idx,
+                "frames": frames,
+                "intersects_bad_frames": intersects_bad_frames,
+                "handedness_label": track["handedness_label"],
+                "side_rank": int(track["side_rank"]),
+                "proposals": [proposal.to_dict() for proposal in proposals],
+            }
+        )
+    tracks.sort(
+        key=lambda item: (
+            not bool(item["intersects_bad_frames"]),
+            int(item["start_frame"]),
+            str(item["handedness_label"]),
+            int(item["side_rank"]),
+            int(item["track_id"]),
+        )
+    )
+    return tracks
+
+
 class MediaPipeProposalDetector:
     def __init__(self, cfg: MediaPipeReviewConfig):
         mp, mp_python, vision = _ensure_mediapipe(cfg)
@@ -123,14 +222,18 @@ class MediaPipeProposalDetector:
                 f"缺少 hand_landmarker.task: {cfg.hand_landmarker_task}"
             )
         self._mp = mp
+        self._running_mode_video = _resolve_video_running_mode(vision)
         base_options = mp_python.BaseOptions(model_asset_path=str(cfg.hand_landmarker_task))
-        options = vision.HandLandmarkerOptions(
+        option_kwargs = dict(
             base_options=base_options,
             num_hands=cfg.detector_max_hands,
             min_hand_detection_confidence=cfg.min_detection_confidence,
             min_hand_presence_confidence=cfg.min_presence_confidence,
             min_tracking_confidence=cfg.min_tracking_confidence,
         )
+        if self._running_mode_video is not None:
+            option_kwargs["running_mode"] = self._running_mode_video
+        options = vision.HandLandmarkerOptions(**option_kwargs)
         self._detector = vision.HandLandmarker.create_from_options(options)
 
     def close(self) -> None:
@@ -142,11 +245,16 @@ class MediaPipeProposalDetector:
         frame_idx: int,
         *,
         output_size: Tuple[int, int] | None = None,
+        timestamp_ms: int | None = None,
     ) -> List[Proposal]:
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.asarray(image))
-        result = self._detector.detect(mp_image)
+        if timestamp_ms is not None and hasattr(self._detector, "detect_for_video"):
+            result = self._detector.detect_for_video(mp_image, int(timestamp_ms))
+        else:
+            result = self._detector.detect(mp_image)
         width, height = output_size or image.size
         proposals: List[Proposal] = []
+        label_counts: Dict[str, int] = defaultdict(int)
         for det_idx, (norm_lms, world_lms, handedness) in enumerate(
             zip(result.hand_landmarks, result.hand_world_landmarks, result.handedness)
         ):
@@ -158,11 +266,15 @@ class MediaPipeProposalDetector:
             bbox_xyxy = _compute_bbox(landmarks_2d, width, height)
             palm_normal, wrist_frame = _derive_palm_geometry(landmarks_3d)
             handedness_score = 0.0
+            handedness_label = "unknown"
             if handedness:
                 category = handedness[0]
                 handedness_score = _safe_float(category.score)
+                handedness_label = str(category.category_name or "unknown")
                 if str(category.category_name).lower().startswith("left"):
                     handedness_score *= -1.0
+            side_rank = int(label_counts[handedness_label])
+            label_counts[handedness_label] += 1
             proposals.append(
                 Proposal(
                     frame_idx=frame_idx,
@@ -170,6 +282,8 @@ class MediaPipeProposalDetector:
                     bbox_xyxy=bbox_xyxy,
                     score=float(abs(handedness_score)),
                     handedness_score=handedness_score,
+                    handedness_label=handedness_label,
+                    side_rank=side_rank,
                     landmarks_2d=landmarks_2d,
                     landmarks_3d_rel=landmarks_3d,
                     roi_rotation_2d=_roi_rotation(landmarks_2d, width, height),
@@ -203,6 +317,8 @@ def _track_card(track: Dict, frames_relpaths: Dict[int, str]) -> Dict:
         "end_frame": track["end_frame"],
         "num_frames": track["num_frames"],
         "intersects_bad_frames": bool(track.get("intersects_bad_frames", False)),
+        "handedness_label": str(track.get("handedness_label", "unknown")),
+        "side_rank": int(track.get("side_rank", 0)),
         "preview_frame": preview_frame,
         "preview_relpath": frames_relpaths[preview_frame],
     }
@@ -276,16 +392,16 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
                 packet.image,
                 packet.frame_idx,
                 output_size=review_image.size,
+                timestamp_ms=max(0, (packet.frame_idx - clip.clip_start) * 33),
             )
     finally:
         detector.close()
 
-    tracks = build_candidate_chains(
+    tracks = _build_mediapipe_tracks(
         per_frame_proposals,
-        image_size=image_size,
-        max_gap=cfg.track_max_gap,
-        min_chain_frames=cfg.min_chain_frames,
         bad_frame_indices=clip.bad_frames,
+        max_gap=cfg.track_max_gap,
+        min_frames=cfg.min_chain_frames,
     )
     visible_tracks = list(tracks)
     too_dense_for_review = len(visible_tracks) > cfg.max_review_tracks
@@ -307,6 +423,7 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
         "dirty_reason": clip.dirty_reason,
         "bad_frame_indices": sorted(bad_frame_lookup),
         "too_dense_for_review": too_dense_for_review,
+        "track_generation": "mediapipe_video_segments",
         "proposals_npz_relpath": str(proposals_npz_path.relative_to(cfg.artifacts_dir)),
         "frames": [
             {

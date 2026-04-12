@@ -49,6 +49,8 @@ class Proposal:
     bbox_xyxy: List[float]
     score: float
     handedness_score: float
+    handedness_label: str
+    side_rank: int
     landmarks_2d: List[List[float]]
     landmarks_3d_rel: List[List[float]]
     roi_rotation_2d: float

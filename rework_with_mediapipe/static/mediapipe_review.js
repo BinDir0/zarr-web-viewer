@@ -198,6 +198,7 @@ if (reviewNode) {
           ${card.intersects_bad_frames ? '<span class="mpr-badge bad">触及 bad frame</span>' : '<span class="mpr-badge">上下文候选</span>'}
           <span class="mpr-badge">${card.role_hint}</span>
         </div>
+        <div class="mpr-meta-note">来源: MediaPipe VIDEO · ${card.handedness_label} · slot ${card.side_rank}</div>
         <div class="mpr-meta-note">frames ${card.start_frame}-${card.end_frame} · ${card.num_frames} 帧</div>
         <div class="mpr-inline">
           <button class="mpr-btn mpr-choice-btn mpr-quick-left" type="button">归到左手</button>

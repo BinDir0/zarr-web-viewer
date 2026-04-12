@@ -2,7 +2,7 @@
 
 这份文档只说明当前这套 `rework_with_mediapipe` 流水线。
 
-目标是把已有脏标注片段切成 clip，先用 MediaPipe 生成候选 Track，再让外包把这些 Track 归并到 wearer-left / wearer-right，最后管理员跑 MANO 拟合并导出结果。
+目标是把已有脏标注片段切成 clip，先用 MediaPipe `VIDEO` 模式生成候选 Track，再让外包把这些 Track 归并到 wearer-left / wearer-right，最后管理员跑 MANO 拟合并导出结果。
 
 ## 角色划分
 
@@ -83,6 +83,7 @@ python3 -m rework_with_mediapipe.jobs.run_preprocess --process --limit 100
 
 - `--limit` 是这一次最多处理多少个 clip，不是帧数
 - 可以多次重复运行，直到队列处理完
+- 当前实现优先复用 MediaPipe 自带的 `VIDEO` 模式 tracking；外层只把 MediaPipe 连续输出整理成 review 用的连续片段
 - 当前 clip 预处理成功后通常会变成 `ready_for_review`
 - 如果候选 Track 过多，clip 会直接进入 `qa_needed_dense_scene`
 
