@@ -31,7 +31,7 @@ mediapipe_review:
   replace_home: true
   db_path: /home/guantianrui/rework-viewer/zarr-web-viewer/mediapipe_review.db
   artifacts_dir: /home/guantianrui/rework-viewer/zarr-web-viewer/mediapipe_review_artifacts
-  source_annotations_db: /home/guantianrui/rework-viewer/zarr-web-viewer/annotations.db
+  source_annotations_db: /home/guantianrui/zarr-flaw-viewer/zarr-web-viewer/annotations.db
   source_config_path: /home/guantianrui/rework-viewer/zarr-web-viewer/config.yaml
   hand_landmarker_task: /share_data/guantianrui/mediapipe/hand_landmarker.task
   mediapipe_repo_root: /share_data/guantianrui/mediapipe
