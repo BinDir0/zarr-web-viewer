@@ -15,16 +15,35 @@ from .frame_sources import make_frame_source
 from .types import ClipRef, Proposal
 
 
+def _import_mediapipe_modules():
+    import mediapipe as mp  # type: ignore
+
+    errors: List[str] = []
+    try:
+        from mediapipe.tasks import python as mp_python  # type: ignore
+        from mediapipe.tasks.python import vision  # type: ignore
+
+        return mp, mp_python, vision
+    except ImportError as exc:
+        errors.append(f"from mediapipe.tasks import python failed: {exc}")
+
+    try:
+        import mediapipe.tasks.python as mp_python  # type: ignore
+        from mediapipe.tasks.python import vision  # type: ignore
+
+        return mp, mp_python, vision
+    except ImportError as exc:
+        errors.append(f"import mediapipe.tasks.python failed: {exc}")
+
+    raise ImportError("; ".join(errors))
+
+
 def _ensure_mediapipe(cfg: MediaPipeReviewConfig):
     first_error: Exception | None = None
 
     if cfg.prefer_installed_mediapipe:
         try:
-            import mediapipe as mp  # type: ignore
-            import mediapipe.tasks.python as mp_python  # type: ignore
-            from mediapipe.tasks.python import vision  # type: ignore
-
-            return mp, mp_python, vision
+            return _import_mediapipe_modules()
         except ImportError as exc:
             first_error = exc
 
@@ -32,17 +51,18 @@ def _ensure_mediapipe(cfg: MediaPipeReviewConfig):
     if repo_root and repo_root not in sys.path:
         sys.path.insert(0, repo_root)
     try:
-        import mediapipe as mp  # type: ignore
-        import mediapipe.tasks.python as mp_python  # type: ignore
-        from mediapipe.tasks.python import vision  # type: ignore
+        return _import_mediapipe_modules()
     except ImportError as exc:
         if first_error is not None:
             raise RuntimeError(
                 "缺少可用的 mediapipe Python 依赖。"
                 "已先尝试环境内安装版本，再尝试 mediapipe_repo_root，均失败。"
+                f" 当前解释器: {sys.executable}。"
             ) from exc
-        raise RuntimeError("缺少 mediapipe Python 依赖，无法运行预计算。") from exc
-    return mp, mp_python, vision
+        raise RuntimeError(
+            "缺少 mediapipe Python 依赖，无法运行预计算。"
+            f" 当前解释器: {sys.executable}。"
+        ) from exc
 
 
 def _compute_bbox(landmarks: List[List[float]], width: int, height: int) -> List[float]:
