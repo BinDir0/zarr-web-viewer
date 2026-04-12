@@ -2,7 +2,7 @@
 factory_base: /share_data/guantianrui/datasets/Egocentric-100K/processed_v9_test_jpg
 factory_start: 1
 factory_end: 70
-# factory_episode_cache_file: /home/guantianrui/zarr-viewer/.factory_episodes_cache_1_70.json
+# factory_episode_cache_file: /home/guantianrui/zarr-web-viewer/.factory_episodes_cache_1_70.json
 # 若配置了下面的 results.jsonl，sanity-check 页面将优先直接标注这批结果，而不是走 factory_start/end 扫描。
 sanity_results_globs:
   - /share_data/zhangtingrui/webdataset_run_002/machines/machine*/results/*.results.jsonl
@@ -23,20 +23,20 @@ legacy_buildai_dataset_name: BuildAI-10k
 source_factory_annotations_db: /home/guantianrui/zarr-web-viewer-100k/zarr-web-viewer/annotations.db
 legacy_buildai_annotations_db: /share_data/guantianrui/EgoYOLO/annotations.db
 
-server_port: 9472
+server_port: 9475
 debug_mode: true
 use_reloader: false
 
 mediapipe_review:
   replace_home: true
-  db_path: /home/guantianrui/rework-viewer/zarr-viewer/mediapipe_review.db
-  artifacts_dir: /home/guantianrui/rework-viewer/zarr-viewer/mediapipe_review_artifacts
-  source_annotations_db: /home/guantianrui/rework-viewer/zarr-viewer/annotations.db
-  source_config_path: /home/guantianrui/rework-viewer/zarr-viewer/config.yaml
-  hand_landmarker_task: /home/guantianrui/mediapipe/hand_landmarker.task
-  mediapipe_repo_root: /home/guantianrui/mediapipe
+  db_path: /home/guantianrui/rework-viewer/zarr-web-viewer/mediapipe_review.db
+  artifacts_dir: /home/guantianrui/rework-viewer/zarr-web-viewer/mediapipe_review_artifacts
+  source_annotations_db: /home/guantianrui/rework-viewer/zarr-web-viewer/annotations.db
+  source_config_path: /home/guantianrui/rework-viewer/zarr-web-viewer/config.yaml
+  hand_landmarker_task: /share_data/guantianrui/mediapipe/hand_landmarker.task
+  mediapipe_repo_root: /share_data/guantianrui/mediapipe
   manopth_root: /share_data/guantianrui/manopth
-  mano_models_root: /share_data/guantianrui/manopth/mano/model
+  mano_models_root: /share_data/guantianrui/manopth/mano/models
   clip_context_frames: 60
   clip_merge_gap: 15
   max_clip_frames: 240
