@@ -52,6 +52,10 @@ body.mpr-page {
   gap: 18px;
 }
 
+.mpr-grid-single {
+  grid-template-columns: 1fr;
+}
+
 .mpr-card {
   padding: 18px;
 }
@@ -96,6 +100,14 @@ body.mpr-page {
   background: rgba(185, 28, 28, 0.12);
   border-color: rgba(185, 28, 28, 0.2);
   color: #b91c1c;
+}
+
+.mpr-instructions,
+.mpr-note {
+  display: grid;
+  gap: 8px;
+  color: #4e4030;
+  line-height: 1.5;
 }
 
 .mpr-btn {

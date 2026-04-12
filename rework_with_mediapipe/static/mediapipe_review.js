@@ -8,8 +8,9 @@ function setText(id, value) {
 
 function renderSummary(summary) {
   const countsNode = document.getElementById("summaryCounts");
-  const depsNode = document.getElementById("dependencyStatus");
-  const pathsNode = document.getElementById("pathInfo");
+  const startLink = document.getElementById("mpr-start-link");
+  const startEmpty = document.getElementById("mpr-start-empty");
+  const startActions = document.getElementById("mpr-start-actions");
   if (countsNode && summary.counts) {
     countsNode.innerHTML = Object.entries(summary.counts)
       .map(([key, value]) => `
@@ -19,15 +20,18 @@ function renderSummary(summary) {
         </div>`)
       .join("");
   }
-  if (depsNode && summary.dependencies) {
-    depsNode.innerHTML = Object.entries(summary.dependencies)
-      .map(([key, value]) => `<span class="mpr-badge ${value ? "ok" : "bad"}">${key}: ${value ? "ok" : "missing"}</span>`)
-      .join("");
-  }
-  if (pathsNode && summary.paths) {
-    pathsNode.innerHTML = Object.entries(summary.paths)
-      .map(([key, value]) => `<div><strong>${key}</strong>: ${value}</div>`)
-      .join("");
+  if (startActions) {
+    if (summary.next_clip_id) {
+      if (startLink) {
+        startLink.href = `/mediapipe/clip/${summary.next_clip_id}`;
+        startLink.textContent = `开始审核 Clip ${summary.next_clip_id}`;
+        startLink.style.display = "";
+      }
+      if (startEmpty) startEmpty.style.display = "none";
+    } else {
+      if (startLink) startLink.style.display = "none";
+      if (startEmpty) startEmpty.style.display = "";
+    }
   }
 }
 
@@ -40,26 +44,8 @@ async function fetchSummary() {
 }
 
 if (dashboardNode) {
-  document.querySelectorAll("[data-job]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const job = button.dataset.job;
-      const limit = Number(document.getElementById("jobLimit")?.value || 25);
-      const outputNode = document.getElementById("jobOutput");
-      if (outputNode) outputNode.textContent = `运行 ${job} 中...`;
-      const response = await fetch(`/api/mediapipe/jobs/${job}`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({limit}),
-      });
-      const data = await response.json();
-      if (outputNode) outputNode.textContent = JSON.stringify(data, null, 2);
-      if (response.ok && data.success) {
-        renderSummary(data);
-      }
-    });
-  });
   fetchSummary().catch((error) => {
-    setText("jobOutput", String(error));
+    console.error(error);
   });
 }
 
