@@ -62,8 +62,12 @@ def main() -> None:
                 update_clip_status(conn, clip_id, status="preprocessing")
                 try:
                     result = preprocess_clip(clip, clip_id, cfg)
-                    replace_candidate_chains(conn, clip_id, result["chains"])
-                    next_status = "ready_for_review" if result["bundle"]["chains"] else "qa_needed"
+                    replace_candidate_chains(conn, clip_id, result["tracks"])
+                    next_status = (
+                        "qa_needed_dense_scene"
+                        if result["bundle"].get("too_dense_for_review")
+                        else "ready_for_review"
+                    )
                     update_clip_status(conn, clip_id, status=next_status, bundle_relpath=result["bundle_relpath"])
                     processed += 1
                     print(f"[preprocess] clip={clip_id} status={next_status}")

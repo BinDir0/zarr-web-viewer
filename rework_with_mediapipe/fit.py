@@ -5,7 +5,7 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -14,7 +14,7 @@ from .config import MediaPipeReviewConfig
 
 @dataclass
 class SideObservations:
-    chain_index: int
+    track_id: int
     frame_indices: List[int]
     landmarks_2d: np.ndarray
     landmarks_3d: np.ndarray
@@ -53,26 +53,17 @@ def _axis_angle_to_rot6(axis_angle, torch) -> np.ndarray:
     return _rotmat_to_rot6(rot.detach().cpu().numpy())
 
 
-def _chain_from_choice(bundle: Dict, choice: str) -> Optional[Dict]:
-    if choice in {"none", "unsure"}:
-        return None
-    prefix, _, raw_index = choice.partition(":")
-    if prefix != "chain":
-        return None
-    chain_index = int(raw_index)
-    for chain in bundle["chains"]:
-        if int(chain["chain_index"]) == chain_index:
-            return chain
-    return None
+def _track_lookup(bundle: Dict) -> Dict[int, Dict]:
+    return {int(track["track_id"]): track for track in bundle.get("tracks", [])}
 
 
-def _build_side_observations(bundle: Dict, choice: str) -> Optional[SideObservations]:
-    chain = _chain_from_choice(bundle, choice)
-    if chain is None:
+def _build_side_observation(bundle: Dict, track_id: int) -> Optional[SideObservations]:
+    track = _track_lookup(bundle).get(int(track_id))
+    if track is None:
         return None
-    proposals = sorted(chain["proposals"], key=lambda item: item["frame_idx"])
+    proposals = sorted(track["proposals"], key=lambda item: item["frame_idx"])
     return SideObservations(
-        chain_index=int(chain["chain_index"]),
+        track_id=int(track["track_id"]),
         frame_indices=[int(item["frame_idx"]) for item in proposals],
         landmarks_2d=np.asarray([item["landmarks_2d"] for item in proposals], dtype=np.float32),
         landmarks_3d=np.asarray([item["landmarks_3d_rel"] for item in proposals], dtype=np.float32),
@@ -172,7 +163,7 @@ def fit_side(side: str, obs: SideObservations, cfg: MediaPipeReviewConfig) -> Di
             rot6.append(_axis_angle_to_rot6(global_orient[frame_idx], torch))
         return {
             "side": side,
-            "chain_index": obs.chain_index,
+            "track_id": obs.track_id,
             "frame_indices": obs.frame_indices,
             "hand_pose_pca": pose_pca.detach().cpu().numpy().astype(np.float32).tolist(),
             "hand_pose_full": hand_full.tolist(),
@@ -185,32 +176,51 @@ def fit_side(side: str, obs: SideObservations, cfg: MediaPipeReviewConfig) -> Di
         }
 
 
+def _build_side_observations(bundle: Dict, track_ids: Sequence[int]) -> List[SideObservations]:
+    observations: List[SideObservations] = []
+    for track_id in track_ids:
+        obs = _build_side_observation(bundle, int(track_id))
+        if obs is not None:
+            observations.append(obs)
+    return observations
+
+
 def fit_reviewed_clip(bundle: Dict, review: Dict, cfg: MediaPipeReviewConfig) -> Dict:
-    left_obs = _build_side_observations(bundle, review["left_choice"])
-    right_obs = _build_side_observations(bundle, review["right_choice"])
+    left_track_ids = [int(item) for item in review.get("left_track_ids", [])]
+    right_track_ids = [int(item) for item in review.get("right_track_ids", [])]
+    left_missing_box = bool(review.get("left_missing_box", False))
+    right_missing_box = bool(review.get("right_missing_box", False))
+    left_observations = _build_side_observations(bundle, left_track_ids)
+    right_observations = _build_side_observations(bundle, right_track_ids)
     fit = {
         "clip_id": bundle["clip_id"],
-        "left_choice": review["left_choice"],
-        "right_choice": review["right_choice"],
-        "sides": {},
+        "left_track_ids": left_track_ids,
+        "right_track_ids": right_track_ids,
+        "left_missing_box": left_missing_box,
+        "right_missing_box": right_missing_box,
+        "sides": {
+            "left": {"missing_box": left_missing_box, "fragments": []},
+            "right": {"missing_box": right_missing_box, "fragments": []},
+        },
     }
-    if left_obs is not None:
-        fit["sides"]["left"] = fit_side("left", left_obs, cfg)
-    if right_obs is not None:
-        fit["sides"]["right"] = fit_side("right", right_obs, cfg)
-    if review["left_choice"] == "unsure" or review["right_choice"] == "unsure":
-        fit["status"] = "qa_needed"
-        fit["message"] = "At least one hand marked as unsure."
+    if left_missing_box or right_missing_box:
+        fit["status"] = "qa_needed_missing_box"
+        fit["message"] = "At least one wearer hand is visible but missing a proposal track."
         return fit
-    if not fit["sides"]:
+    for obs in left_observations:
+        fit["sides"]["left"]["fragments"].append(fit_side("left", obs, cfg))
+    for obs in right_observations:
+        fit["sides"]["right"]["fragments"].append(fit_side("right", obs, cfg))
+    if not fit["sides"]["left"]["fragments"] and not fit["sides"]["right"]["fragments"]:
         fit["status"] = "fit_ok_negative"
         fit["message"] = "No wearer hand visible in this clip."
         fit["median_reproj_error"] = 0.0
         fit["p95_reproj_error"] = 0.0
         return fit
     all_errors = []
-    for side_fit in fit["sides"].values():
-        all_errors.extend(side_fit["reproj_error"])
+    for side_name in ("left", "right"):
+        for fragment in fit["sides"][side_name]["fragments"]:
+            all_errors.extend(fragment["reproj_error"])
     median_err = float(np.median(all_errors)) if all_errors else math.inf
     p95_err = float(np.percentile(all_errors, 95)) if all_errors else math.inf
     fit["median_reproj_error"] = median_err
@@ -218,9 +228,66 @@ def fit_reviewed_clip(bundle: Dict, review: Dict, cfg: MediaPipeReviewConfig) ->
     fit["status"] = (
         "fit_ok"
         if median_err <= cfg.max_median_reproj_error_px and p95_err <= cfg.max_p95_reproj_error_px
-        else "qa_needed"
+        else "fit_failed"
     )
     return fit
+
+
+def _empty_fragment_arrays(prefix: str, arrays: Dict[str, np.ndarray]) -> None:
+    arrays[prefix + "fragment_track_ids"] = np.zeros((0,), dtype=np.int32)
+    arrays[prefix + "fragment_offsets"] = np.zeros((1,), dtype=np.int32)
+    arrays[prefix + "frame_indices"] = np.zeros((0,), dtype=np.int32)
+    arrays[prefix + "hand_pose_pca"] = np.zeros((0, 15), dtype=np.float32)
+    arrays[prefix + "hand_pose_full"] = np.zeros((0, 45), dtype=np.float32)
+    arrays[prefix + "global_orient"] = np.zeros((0, 3), dtype=np.float32)
+    arrays[prefix + "betas"] = np.zeros((0, 10), dtype=np.float32)
+    arrays[prefix + "wrist_cam"] = np.zeros((0, 3), dtype=np.float32)
+    arrays[prefix + "wrist_rot6"] = np.zeros((0, 6), dtype=np.float32)
+    arrays[prefix + "reproj_error"] = np.zeros((0,), dtype=np.float32)
+
+
+def _flatten_side_fragments(side_payload: Optional[Dict], prefix: str, arrays: Dict[str, np.ndarray]) -> None:
+    fragments = list((side_payload or {}).get("fragments", []))
+    arrays[prefix + "missing_box"] = np.asarray([1 if bool((side_payload or {}).get("missing_box", False)) else 0], dtype=np.int8)
+    if not fragments:
+        _empty_fragment_arrays(prefix, arrays)
+        return
+
+    track_ids: List[int] = []
+    offsets = [0]
+    frame_indices: List[np.ndarray] = []
+    hand_pose_pca: List[np.ndarray] = []
+    hand_pose_full: List[np.ndarray] = []
+    global_orient: List[np.ndarray] = []
+    betas: List[np.ndarray] = []
+    wrist_cam: List[np.ndarray] = []
+    wrist_rot6: List[np.ndarray] = []
+    reproj_error: List[np.ndarray] = []
+    total = 0
+    for fragment in fragments:
+        frames = np.asarray(fragment["frame_indices"], dtype=np.int32)
+        total += len(frames)
+        offsets.append(total)
+        track_ids.append(int(fragment["track_id"]))
+        frame_indices.append(frames)
+        hand_pose_pca.append(np.asarray(fragment["hand_pose_pca"], dtype=np.float32))
+        hand_pose_full.append(np.asarray(fragment["hand_pose_full"], dtype=np.float32))
+        global_orient.append(np.asarray(fragment["global_orient"], dtype=np.float32))
+        betas.append(np.asarray(fragment["betas"], dtype=np.float32))
+        wrist_cam.append(np.asarray(fragment["wrist_cam"], dtype=np.float32))
+        wrist_rot6.append(np.asarray(fragment["wrist_rot6"], dtype=np.float32))
+        reproj_error.append(np.asarray(fragment["reproj_error"], dtype=np.float32))
+
+    arrays[prefix + "fragment_track_ids"] = np.asarray(track_ids, dtype=np.int32)
+    arrays[prefix + "fragment_offsets"] = np.asarray(offsets, dtype=np.int32)
+    arrays[prefix + "frame_indices"] = np.concatenate(frame_indices, axis=0) if frame_indices else np.zeros((0,), dtype=np.int32)
+    arrays[prefix + "hand_pose_pca"] = np.concatenate(hand_pose_pca, axis=0) if hand_pose_pca else np.zeros((0, 15), dtype=np.float32)
+    arrays[prefix + "hand_pose_full"] = np.concatenate(hand_pose_full, axis=0) if hand_pose_full else np.zeros((0, 45), dtype=np.float32)
+    arrays[prefix + "global_orient"] = np.concatenate(global_orient, axis=0) if global_orient else np.zeros((0, 3), dtype=np.float32)
+    arrays[prefix + "betas"] = np.stack(betas, axis=0) if betas else np.zeros((0, 10), dtype=np.float32)
+    arrays[prefix + "wrist_cam"] = np.concatenate(wrist_cam, axis=0) if wrist_cam else np.zeros((0, 3), dtype=np.float32)
+    arrays[prefix + "wrist_rot6"] = np.concatenate(wrist_rot6, axis=0) if wrist_rot6 else np.zeros((0, 6), dtype=np.float32)
+    arrays[prefix + "reproj_error"] = np.concatenate(reproj_error, axis=0) if reproj_error else np.zeros((0,), dtype=np.float32)
 
 
 def save_fit_artifacts(bundle_dir: Path, fit_payload: Dict) -> Dict[str, str]:
@@ -232,26 +299,8 @@ def save_fit_artifacts(bundle_dir: Path, fit_payload: Dict) -> Dict[str, str]:
 
     arrays = {}
     for side in ("left", "right"):
-        payload = fit_payload.get("sides", {}).get(side)
         prefix = f"{side}_"
-        if payload is None:
-            arrays[prefix + "frame_indices"] = np.zeros((0,), dtype=np.int32)
-            arrays[prefix + "hand_pose_pca"] = np.zeros((0, 15), dtype=np.float32)
-            arrays[prefix + "hand_pose_full"] = np.zeros((0, 45), dtype=np.float32)
-            arrays[prefix + "global_orient"] = np.zeros((0, 3), dtype=np.float32)
-            arrays[prefix + "betas"] = np.zeros((10,), dtype=np.float32)
-            arrays[prefix + "wrist_cam"] = np.zeros((0, 3), dtype=np.float32)
-            arrays[prefix + "wrist_rot6"] = np.zeros((0, 6), dtype=np.float32)
-            arrays[prefix + "reproj_error"] = np.zeros((0,), dtype=np.float32)
-            continue
-        arrays[prefix + "frame_indices"] = np.asarray(payload["frame_indices"], dtype=np.int32)
-        arrays[prefix + "hand_pose_pca"] = np.asarray(payload["hand_pose_pca"], dtype=np.float32)
-        arrays[prefix + "hand_pose_full"] = np.asarray(payload["hand_pose_full"], dtype=np.float32)
-        arrays[prefix + "global_orient"] = np.asarray(payload["global_orient"], dtype=np.float32)
-        arrays[prefix + "betas"] = np.asarray(payload["betas"], dtype=np.float32)
-        arrays[prefix + "wrist_cam"] = np.asarray(payload["wrist_cam"], dtype=np.float32)
-        arrays[prefix + "wrist_rot6"] = np.asarray(payload["wrist_rot6"], dtype=np.float32)
-        arrays[prefix + "reproj_error"] = np.asarray(payload["reproj_error"], dtype=np.float32)
+        _flatten_side_fragments(fit_payload.get("sides", {}).get(side), prefix, arrays)
     arrays["median_reproj_error"] = np.asarray([fit_payload.get("median_reproj_error", 0.0)], dtype=np.float32)
     arrays["p95_reproj_error"] = np.asarray([fit_payload.get("p95_reproj_error", 0.0)], dtype=np.float32)
     np.savez_compressed(npz_path, **arrays)

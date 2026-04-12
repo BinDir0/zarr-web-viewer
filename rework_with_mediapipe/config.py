@@ -189,6 +189,10 @@ class MediaPipeReviewConfig:
         return int(self.raw["top_k_chains"])
 
     @property
+    def max_review_tracks(self) -> int:
+        return int(self.raw["max_review_tracks"])
+
+    @property
     def fit_device(self) -> str:
         return str(self.raw["fit_device"])
 
@@ -292,8 +296,9 @@ def load_config(config_path: str | None = None) -> MediaPipeReviewConfig:
         "min_presence_confidence": 0.35,
         "min_tracking_confidence": 0.35,
         "track_max_gap": 2,
-        "min_chain_frames": 5,
+        "min_chain_frames": 2,
         "top_k_chains": 4,
+        "max_review_tracks": 12,
         "fit_device": "cpu",
         "fit_stage1_steps": 80,
         "fit_stage2_steps": 150,

@@ -23,31 +23,49 @@
             <input id="mpr-frame-slider" type="range" min="0" max="0" value="0">
             <span id="mpr-frame-label">0 / 0</span>
           </div>
+          <section class="mpr-focus-panel">
+            <div id="mpr-focus-hint" class="mpr-meta-note">正在加载重点帧…</div>
+            <div id="mpr-bad-frame-chips" class="mpr-inline"></div>
+          </section>
         </section>
         <aside class="mpr-side-panel">
           <section class="mpr-card">
-            <h2>佩戴者左手</h2>
-            <div id="mpr-left-choices"></div>
+            <h2>审核规则</h2>
+            <div class="mpr-instructions">
+              <div><span class="mpr-inline-badge mpr-inline-badge-blue">Track</span> 蓝框是可选候选，编号全局固定。</div>
+              <div><span class="mpr-inline-badge mpr-inline-badge-green">左手</span> 选给 wearer-left 后变绿。</div>
+              <div><span class="mpr-inline-badge mpr-inline-badge-red">右手</span> 选给 wearer-right 后变红。</div>
+              <div>不属于 wearer 的手直接忽略，不单独做别的标记。</div>
+              <div>如果该侧手可见但 proposal 没给出可用框，请勾“该侧可见但缺框”。</div>
+            </div>
           </section>
           <section class="mpr-card">
-            <h2>佩戴者右手</h2>
-            <div id="mpr-right-choices"></div>
+            <div class="mpr-side-head">
+              <h2>佩戴者左手</h2>
+              <button id="mpr-left-clear" class="mpr-btn mpr-btn-secondary" type="button">清空左手</button>
+            </div>
+            <div id="mpr-left-summary" class="mpr-selection-summary"></div>
+            <label class="mpr-checkbox-row">
+              <input id="mpr-left-missing-box" type="checkbox">
+              <span>左手可见，但没有被 proposal 打上框</span>
+            </label>
           </section>
           <section class="mpr-card">
-            <h2>候选轨迹</h2>
+            <div class="mpr-side-head">
+              <h2>佩戴者右手</h2>
+              <button id="mpr-right-clear" class="mpr-btn mpr-btn-secondary" type="button">清空右手</button>
+            </div>
+            <div id="mpr-right-summary" class="mpr-selection-summary"></div>
+            <label class="mpr-checkbox-row">
+              <input id="mpr-right-missing-box" type="checkbox">
+              <span>右手可见，但没有被 proposal 打上框</span>
+            </label>
+          </section>
+          <section class="mpr-card">
+            <h2>候选 Track</h2>
             <div id="mpr-candidate-cards" class="mpr-candidate-list"></div>
           </section>
-          <section id="mpr-merge-card" class="mpr-card mpr-hidden">
-            <h2>补充问题</h2>
-            <div id="mpr-merge-questions"></div>
-          </section>
           <section class="mpr-card">
-            <label for="mpr-review-confidence">审核置信度</label>
-            <select id="mpr-review-confidence">
-              <option value="high">high</option>
-              <option value="normal" selected>normal</option>
-              <option value="low">low</option>
-            </select>
             <button id="mpr-submit-review" class="mpr-btn mpr-btn-primary mpr-full-width">提交</button>
             <div id="mpr-submit-message" class="mpr-meta-note"></div>
           </section>

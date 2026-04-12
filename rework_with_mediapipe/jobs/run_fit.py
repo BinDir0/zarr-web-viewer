@@ -24,19 +24,14 @@ def main() -> None:
         for job in jobs:
             clip_id = int(job["clip_id"])
             clip = conn.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
-            review = conn.execute("SELECT * FROM vendor_reviews WHERE clip_id = ?", (clip_id,)).fetchone()
-            if clip is None or review is None or not clip["bundle_relpath"]:
+            if clip is None or not clip["bundle_relpath"] or not clip["review_payload_json"]:
                 save_fit_result(conn, clip_id, "qa_needed", {"status": "qa_needed", "message": "Missing review/bundle"})
                 continue
             bundle_dir = cfg.artifact_abspath(str(clip["bundle_relpath"]))
             bundle_path = bundle_dir / "bundle.json"
             with bundle_path.open("r", encoding="utf-8") as f:
                 bundle = json.load(f)
-            review_payload = {
-                "left_choice": review["left_choice"],
-                "right_choice": review["right_choice"],
-                "merge_answers": json.loads(review["merge_answers_json"]),
-            }
+            review_payload = json.loads(str(clip["review_payload_json"]))
             try:
                 fit_payload = fit_reviewed_clip(bundle, review_payload, cfg)
                 save_fit_artifacts(bundle_dir, fit_payload)

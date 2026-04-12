@@ -65,6 +65,7 @@ SCHEMA = [
         right_choice TEXT NOT NULL,
         merge_answers_json TEXT NOT NULL,
         review_confidence TEXT,
+        review_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
@@ -94,7 +95,16 @@ SCHEMA = [
 def init_db(conn: sqlite3.Connection) -> None:
     for statement in SCHEMA:
         conn.execute(statement)
+    _ensure_column(conn, "vendor_reviews", "review_json", "TEXT NOT NULL DEFAULT '{}'")
     conn.commit()
+
+
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    existing = {str(row["name"]) for row in rows}
+    if column_name in existing:
+        return
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
 @contextmanager
@@ -210,6 +220,7 @@ def update_clip_status(
 def replace_candidate_chains(conn: sqlite3.Connection, clip_id: int, chains: Iterable[Dict[str, Any]]) -> None:
     conn.execute("DELETE FROM candidate_chains WHERE clip_id = ?", (clip_id,))
     for chain in chains:
+        track_id = int(chain.get("track_id", chain.get("chain_index", 0)))
         conn.execute(
             """
             INSERT INTO candidate_chains (
@@ -219,7 +230,7 @@ def replace_candidate_chains(conn: sqlite3.Connection, clip_id: int, chains: Ite
             """,
             (
                 clip_id,
-                int(chain["chain_index"]),
+                track_id,
                 chain.get("role_hint"),
                 float(chain["score"]),
                 int(chain["start_frame"]),
@@ -268,61 +279,95 @@ def get_clip(conn: sqlite3.Connection, clip_id: int) -> Optional[Dict[str, Any]]
         "SELECT * FROM candidate_chains WHERE clip_id = ? ORDER BY chain_index",
         (clip_id,),
     ).fetchall()
-    clip["chains"] = [{**dict(chain), "chain_json": _loads(chain["chain_json"], {})} for chain in chains]
+    clip["tracks"] = [
+        {
+            **dict(chain),
+            "track_id": int(chain["chain_index"]),
+            "track_json": _loads(chain["chain_json"], {}),
+        }
+        for chain in chains
+    ]
     review = conn.execute("SELECT * FROM vendor_reviews WHERE clip_id = ?", (clip_id,)).fetchone()
     clip["vendor_review"] = dict(review) if review is not None else None
     if clip["vendor_review"] is not None:
         clip["vendor_review"]["merge_answers_json"] = _loads(clip["vendor_review"]["merge_answers_json"], [])
+        clip["vendor_review"]["review_json"] = _loads(clip["vendor_review"].get("review_json"), {})
     return clip
 
 
 def save_vendor_review(
     conn: sqlite3.Connection,
     clip_id: int,
-    left_choice: str,
-    right_choice: str,
-    merge_answers: List[Dict[str, Any]],
-    review_confidence: str,
+    review_payload: Dict[str, Any],
 ) -> None:
+    left_track_ids = [int(item) for item in review_payload.get("left_track_ids", [])]
+    right_track_ids = [int(item) for item in review_payload.get("right_track_ids", [])]
+    left_missing_box = bool(review_payload.get("left_missing_box", False))
+    right_missing_box = bool(review_payload.get("right_missing_box", False))
+    should_exclude = left_missing_box or right_missing_box
     payload = {
-        "left_choice": left_choice,
-        "right_choice": right_choice,
-        "merge_answers": merge_answers,
-        "review_confidence": review_confidence,
+        "left_track_ids": left_track_ids,
+        "right_track_ids": right_track_ids,
+        "left_missing_box": left_missing_box,
+        "right_missing_box": right_missing_box,
     }
     conn.execute(
         """
-        INSERT INTO vendor_reviews (clip_id, left_choice, right_choice, merge_answers_json, review_confidence)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO vendor_reviews (clip_id, left_choice, right_choice, merge_answers_json, review_confidence, review_json)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(clip_id) DO UPDATE SET
             left_choice = excluded.left_choice,
             right_choice = excluded.right_choice,
             merge_answers_json = excluded.merge_answers_json,
             review_confidence = excluded.review_confidence,
+            review_json = excluded.review_json,
             updated_at = CURRENT_TIMESTAMP
         """,
-        (clip_id, left_choice, right_choice, _dumps(merge_answers), review_confidence),
+        (
+            clip_id,
+            _dumps(left_track_ids),
+            _dumps(right_track_ids),
+            "[]",
+            "missing_box" if should_exclude else "normal",
+            _dumps(payload),
+        ),
     )
     conn.execute(
         """
         UPDATE clips
-        SET status = 'reviewed',
+        SET status = ?,
             review_payload_json = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (_dumps(payload), clip_id),
+        ("qa_needed_missing_box" if should_exclude else "reviewed_ready_for_fit", _dumps(payload), clip_id),
     )
-    conn.execute(
-        """
-        INSERT INTO fit_jobs (clip_id, status)
-        VALUES (?, 'queued_fit')
-        ON CONFLICT(clip_id) DO UPDATE SET
-            status = 'queued_fit',
-            updated_at = CURRENT_TIMESTAMP
-        """,
-        (clip_id,),
-    )
+    if should_exclude:
+        conn.execute(
+            """
+            INSERT INTO fit_jobs (clip_id, status, fit_json)
+            VALUES (?, 'qa_needed_missing_box', ?)
+            ON CONFLICT(clip_id) DO UPDATE SET
+                status = 'qa_needed_missing_box',
+                fit_json = excluded.fit_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                clip_id,
+                _dumps({"status": "qa_needed_missing_box", "message": "Reviewer marked at least one side as missing box."}),
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO fit_jobs (clip_id, status)
+            VALUES (?, 'queued_fit')
+            ON CONFLICT(clip_id) DO UPDATE SET
+                status = 'queued_fit',
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (clip_id,),
+        )
     conn.commit()
 
 
@@ -345,7 +390,12 @@ def save_fit_result(conn: sqlite3.Connection, clip_id: int, status: str, fit_jso
         """,
         (clip_id, status, _dumps(fit_json)),
     )
-    clip_status = "fit_ok" if status.startswith("fit_ok") else "qa_needed"
+    if status.startswith("fit_ok"):
+        clip_status = "fit_ok"
+    elif status.startswith("qa_needed"):
+        clip_status = status
+    else:
+        clip_status = "fit_failed"
     conn.execute(
         """
         UPDATE clips

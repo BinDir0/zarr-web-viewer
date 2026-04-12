@@ -12,7 +12,7 @@
         <div>
           <div class="mpr-kicker">Ego Hand Recovery</div>
           <h1>MediaPipe Clip Review</h1>
-          <p>这个页面只给审核员使用。审核员只需要查看 clip，并选择 wearer-left / wearer-right / none / unsure。</p>
+          <p>这个页面只给审核员使用。审核员只需要把候选 Track 归到 wearer-left / wearer-right，或者标记该侧可见但缺框。</p>
         </div>
         <div class="mpr-actions" id="mpr-start-actions">
           {% if summary.next_clip_id %}
@@ -41,8 +41,8 @@
         <h2>审核说明</h2>
         <div class="mpr-instructions">
           <div>1. 点“开始审核”进入一条 clip。</div>
-          <div>2. 左右手各选一条候选轨迹；都没有就选 <code>none</code>。</div>
-          <div>3. 只有确实看不清时才选 <code>unsure</code>。</div>
+          <div>2. 一个 side 可以归并多个 Track；不属于 wearer 的手直接忽略。</div>
+          <div>3. 如果画面里能看到手，但没有任何候选框，请勾该侧 <code>可见但缺框</code>。</div>
           <div>4. 提交后会自动跳到下一条 ready clip。</div>
         </div>
       </section>

@@ -71,8 +71,10 @@ def build_candidate_chains(
     image_size: Tuple[int, int],
     max_gap: int,
     min_chain_frames: int,
+    bad_frame_indices: Sequence[int] | None = None,
 ) -> List[Dict]:
     image_diag = float(math.hypot(*image_size))
+    bad_frames = {int(item) for item in (bad_frame_indices or [])}
     active: List[ChainState] = []
     finished: List[ChainState] = []
     next_chain_index = 0
@@ -107,11 +109,15 @@ def build_candidate_chains(
     finished.extend(active)
     chains: List[Dict] = []
     for chain in finished:
-        if len(chain.proposals) < min_chain_frames:
-            continue
         frames = [proposal.frame_idx for proposal in chain.proposals]
+        num_frames = len(frames)
+        intersects_bad_frames = any(frame_idx in bad_frames for frame_idx in frames)
+        if num_frames < max(1, min_chain_frames) and not intersects_bad_frames:
+            continue
+        if num_frames < 2 and not intersects_bad_frames:
+            continue
         avg_score = float(sum(item.score for item in chain.proposals) / len(chain.proposals))
-        coverage_score = len(frames) + avg_score
+        coverage_score = len(frames) + avg_score + (3.0 if intersects_bad_frames else 0.0)
         role_hint = "unknown"
         mean_handedness = float(sum(item.handedness_score for item in chain.proposals) / len(chain.proposals))
         if mean_handedness >= 0.5:
@@ -121,40 +127,28 @@ def build_candidate_chains(
         preview_idx = frames[len(frames) // 2]
         chains.append(
             {
+                "track_id": chain.chain_index,
                 "chain_index": chain.chain_index,
                 "role_hint": role_hint,
                 "score": coverage_score,
                 "start_frame": min(frames),
                 "end_frame": max(frames),
-                "num_frames": len(frames),
+                "num_frames": num_frames,
                 "preview_frame": preview_idx,
                 "frames": frames,
+                "intersects_bad_frames": intersects_bad_frames,
                 "proposals": [proposal.to_dict() for proposal in chain.proposals],
             }
         )
-    chains.sort(key=lambda item: item["score"], reverse=True)
-    for new_idx, chain in enumerate(chains):
-        chain["chain_index"] = new_idx
+    chains.sort(
+        key=lambda item: (
+            not bool(item["intersects_bad_frames"]),
+            -float(item["score"]),
+            int(item["track_id"]),
+        )
+    )
     return chains
 
 
 def build_merge_questions(chains: Sequence[Dict], max_questions: int = 2) -> List[Dict]:
-    questions: List[Dict] = []
-    for i, left in enumerate(chains):
-        for right in chains[i + 1 :]:
-            gap = right["start_frame"] - left["end_frame"]
-            if gap < 1 or gap > 15:
-                continue
-            if left["role_hint"] != right["role_hint"]:
-                continue
-            questions.append(
-                {
-                    "question_id": f"merge_{left['chain_index']}_{right['chain_index']}",
-                    "chain_a": left["chain_index"],
-                    "chain_b": right["chain_index"],
-                    "prompt": f"候选 {left['chain_index']} 和 {right['chain_index']} 是否是同一只手离开后又回来？",
-                }
-            )
-            if len(questions) >= max_questions:
-                return questions
-    return questions
+    return []

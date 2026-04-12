@@ -11,6 +11,7 @@ from .db import (
     count_clips_by_status,
     get_clip,
     list_clips_by_status,
+    list_clips_by_statuses,
     list_fit_jobs,
     open_db,
     save_vendor_review,
@@ -57,7 +58,7 @@ def _summary_payload(cfg: MediaPipeReviewConfig) -> Dict[str, Any]:
     with open_db(cfg.db_path) as conn:
         counts = count_clips_by_status(conn)
         next_ready = list_clips_by_status(conn, "ready_for_review", limit=1)
-        reviewed = list_clips_by_status(conn, "reviewed", limit=5)
+        reviewed = list_clips_by_statuses(conn, ["reviewed_ready_for_fit", "fit_ok", "exported"], limit=5)
         queued_fit = list_fit_jobs(conn, status="queued_fit", limit=5)
     return {
         "counts": counts,
@@ -131,26 +132,51 @@ def api_clip(clip_id: int):
 def api_submit_review(clip_id: int):
     cfg = init_runtime()
     payload = request.get_json(force=True)
-    left_choice = str(payload.get("left_choice", "")).strip()
-    right_choice = str(payload.get("right_choice", "")).strip()
-    merge_answers = payload.get("merge_answers", [])
-    review_confidence = str(payload.get("review_confidence", "")).strip() or "normal"
-    if not left_choice or not right_choice:
-        return jsonify({"success": False, "message": "left_choice and right_choice are required"}), 400
-    concrete_left = left_choice not in {"none", "unsure"}
-    concrete_right = right_choice not in {"none", "unsure"}
-    if concrete_left and concrete_right and left_choice == right_choice:
-        return jsonify({"success": False, "message": "Left and right cannot point to the same candidate"}), 400
+    left_track_ids = payload.get("left_track_ids", [])
+    right_track_ids = payload.get("right_track_ids", [])
+    left_missing_box = bool(payload.get("left_missing_box", False))
+    right_missing_box = bool(payload.get("right_missing_box", False))
+    if not isinstance(left_track_ids, list) or not isinstance(right_track_ids, list):
+        return jsonify({"success": False, "message": "left_track_ids and right_track_ids must be arrays"}), 400
+
+    def _int_set(raw_items):
+        values = []
+        for item in raw_items:
+            try:
+                values.append(int(item))
+            except (TypeError, ValueError):
+                raise ValueError("track ids must be integers")
+        return sorted(set(values))
+
+    try:
+        left_track_ids = _int_set(left_track_ids)
+        right_track_ids = _int_set(right_track_ids)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+
+    overlap = sorted(set(left_track_ids) & set(right_track_ids))
+    if overlap:
+        return jsonify({"success": False, "message": "Left and right cannot share the same track"}), 400
     with open_db(cfg.db_path) as conn:
-        if get_clip(conn, clip_id) is None:
+        clip = get_clip(conn, clip_id)
+        if clip is None:
             abort(404)
+        if not clip.get("bundle_relpath"):
+            return jsonify({"success": False, "message": "clip bundle is missing"}), 400
+        bundle = _load_bundle(cfg, clip["bundle_relpath"])
+        valid_track_ids = {int(item["track_id"]) for item in bundle.get("tracks", [])}
+        invalid = [item for item in left_track_ids + right_track_ids if item not in valid_track_ids]
+        if invalid:
+            return jsonify({"success": False, "message": f"Unknown track ids: {sorted(set(invalid))}"}), 400
         save_vendor_review(
             conn,
             clip_id=clip_id,
-            left_choice=left_choice,
-            right_choice=right_choice,
-            merge_answers=merge_answers if isinstance(merge_answers, list) else [],
-            review_confidence=review_confidence,
+            review_payload={
+                "left_track_ids": left_track_ids,
+                "right_track_ids": right_track_ids,
+                "left_missing_box": left_missing_box,
+                "right_missing_box": right_missing_box,
+            },
         )
         next_rows = list_clips_by_status(conn, "ready_for_review", limit=1)
     return jsonify({"success": True, "next_clip_id": int(next_rows[0]["id"]) if next_rows else None})

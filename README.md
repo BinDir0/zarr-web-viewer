@@ -65,6 +65,8 @@ python app.py
 
 **返工标注（仅历史标为 BAD_FRAMES 的 episode，三态帧标签）：** 访问 `http://localhost:<端口>/rework`（数据写入 `REWORK_V1:` 格式后会从返工队列中移除）。
 
+**MediaPipe 审核流水线：** 见 [MEDIAPIPE_REVIEW_FLOW.md](/root/zarr-viewer/MEDIAPIPE_REVIEW_FLOW.md)。
+
 ## 数据集结构说明
 
 本工具支持以下 zarr 数据集结构（连续存储格式）：
@@ -135,4 +137,3 @@ frames = get_middle_frames(episode_data["images"], num_frames=2)
 - 后端: Flask + zarr + numpy
 - 前端: 原生 JavaScript + CSS
 - 数据库: SQLite
-

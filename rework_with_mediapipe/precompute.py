@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 from PIL import Image
 
-from .chains import build_candidate_chains, build_merge_questions
+from .chains import build_candidate_chains
 from .config import MediaPipeReviewConfig
 from .frame_sources import make_frame_source
 from .types import ClipRef, Proposal
@@ -136,10 +136,16 @@ class MediaPipeProposalDetector:
     def close(self) -> None:
         self._detector.close()
 
-    def detect(self, image: Image.Image, frame_idx: int) -> List[Proposal]:
+    def detect(
+        self,
+        image: Image.Image,
+        frame_idx: int,
+        *,
+        output_size: Tuple[int, int] | None = None,
+    ) -> List[Proposal]:
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.asarray(image))
         result = self._detector.detect(mp_image)
-        width, height = image.size
+        width, height = output_size or image.size
         proposals: List[Proposal] = []
         for det_idx, (norm_lms, world_lms, handedness) in enumerate(
             zip(result.hand_landmarks, result.hand_world_landmarks, result.handedness)
@@ -187,15 +193,16 @@ def _save_review_frame(image: Image.Image, output_path: Path) -> None:
     image.save(output_path, format="JPEG", quality=80)
 
 
-def _candidate_card(chain: Dict, frames_relpaths: Dict[int, str]) -> Dict:
-    preview_frame = int(chain["preview_frame"])
+def _track_card(track: Dict, frames_relpaths: Dict[int, str]) -> Dict:
+    preview_frame = int(track["preview_frame"])
     return {
-        "chain_index": chain["chain_index"],
-        "role_hint": chain["role_hint"],
-        "score": chain["score"],
-        "start_frame": chain["start_frame"],
-        "end_frame": chain["end_frame"],
-        "num_frames": chain["num_frames"],
+        "track_id": int(track["track_id"]),
+        "role_hint": track["role_hint"],
+        "score": track["score"],
+        "start_frame": track["start_frame"],
+        "end_frame": track["end_frame"],
+        "num_frames": track["num_frames"],
+        "intersects_bad_frames": bool(track.get("intersects_bad_frames", False)),
         "preview_frame": preview_frame,
         "preview_relpath": frames_relpaths[preview_frame],
     }
@@ -265,28 +272,31 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
             relpath = f"bundles/clip_{clip_id:06d}/frames/{packet.frame_idx:06d}.jpg"
             _save_review_frame(review_image, frames_dir / f"{packet.frame_idx:06d}.jpg")
             frames_relpaths[packet.frame_idx] = relpath
-            per_frame_proposals[packet.frame_idx] = detector.detect(review_image, packet.frame_idx)
+            per_frame_proposals[packet.frame_idx] = detector.detect(
+                packet.image,
+                packet.frame_idx,
+                output_size=review_image.size,
+            )
     finally:
         detector.close()
 
-    chains = build_candidate_chains(
+    tracks = build_candidate_chains(
         per_frame_proposals,
         image_size=image_size,
         max_gap=cfg.track_max_gap,
         min_chain_frames=cfg.min_chain_frames,
+        bad_frame_indices=clip.bad_frames,
     )
-    top_k = cfg.top_k_chains
-    visible_chains = chains[:top_k]
-    for idx, chain in enumerate(chains):
-        chain["hidden"] = idx >= top_k
-    merge_questions = build_merge_questions(visible_chains)
+    visible_tracks = list(tracks)
+    too_dense_for_review = len(visible_tracks) > cfg.max_review_tracks
 
     chain_lookup: Dict[Tuple[int, int], int] = {}
-    for chain in chains:
-        for proposal in chain["proposals"]:
-            chain_lookup[(int(proposal["frame_idx"]), int(proposal["det_idx"]))] = int(chain["chain_index"])
+    for track in tracks:
+        for proposal in track["proposals"]:
+            chain_lookup[(int(proposal["frame_idx"]), int(proposal["det_idx"]))] = int(track["track_id"])
 
     proposals_npz_path = _save_proposals_npz(bundle_dir, per_frame_proposals, chain_lookup)
+    bad_frame_lookup = {int(frame_idx) for frame_idx in clip.bad_frames}
     bundle = {
         "clip_id": clip_id,
         "episode_id": clip.episode.episode_id,
@@ -295,15 +305,19 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
         "clip_start": clip.clip_start,
         "clip_end": clip.clip_end,
         "dirty_reason": clip.dirty_reason,
-        "bad_frames": clip.bad_frames,
+        "bad_frame_indices": sorted(bad_frame_lookup),
+        "too_dense_for_review": too_dense_for_review,
         "proposals_npz_relpath": str(proposals_npz_path.relative_to(cfg.artifacts_dir)),
         "frames": [
-            {"frame_idx": frame_idx, "relpath": frames_relpaths[frame_idx]}
+            {
+                "frame_idx": frame_idx,
+                "relpath": frames_relpaths[frame_idx],
+                "is_bad": frame_idx in bad_frame_lookup,
+            }
             for frame_idx in sorted(frames_relpaths.keys())
         ],
-        "chains": visible_chains,
-        "merge_questions": merge_questions,
-        "card_view": [_candidate_card(chain, frames_relpaths) for chain in visible_chains],
+        "tracks": visible_tracks,
+        "track_cards": [_track_card(track, frames_relpaths) for track in visible_tracks],
     }
     with (bundle_dir / "bundle.json").open("w", encoding="utf-8") as f:
         json.dump(bundle, f, ensure_ascii=False, indent=2)
@@ -311,5 +325,5 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
         "bundle_dir": str(bundle_dir),
         "bundle_relpath": str(bundle_dir.relative_to(cfg.artifacts_dir)),
         "bundle": bundle,
-        "chains": chains,
+        "tracks": tracks,
     }
