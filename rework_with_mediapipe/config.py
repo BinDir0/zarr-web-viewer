@@ -18,15 +18,53 @@ def _deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, An
     return merged
 
 
-def _default_mano_models_root() -> str:
-    candidates = [
-        Path("/root/manopth/mano/model"),
-        Path("/root/manopth/mano/models"),
-    ]
+def _path_exists(candidate: Path) -> bool:
+    try:
+        return candidate.exists()
+    except (OSError, PermissionError):
+        return False
+
+
+def _first_existing_path(*raw_candidates: str) -> str:
+    candidates = [Path(item) for item in raw_candidates if item]
     for candidate in candidates:
-        if candidate.exists():
+        if _path_exists(candidate):
             return str(candidate)
-    return str(candidates[0])
+    return str(candidates[0]) if candidates else ""
+
+
+def _default_mano_models_root() -> str:
+    return _first_existing_path(
+        os.environ.get("MANO_MODELS_ROOT", ""),
+        "/share_data/guantianrui/manopth/mano/models",
+        "/share_data/guantianrui/manopth/mano/model",
+        "/root/manopth/mano/models",
+        "/root/manopth/mano/model",
+    )
+
+
+def _default_manopth_root() -> str:
+    return _first_existing_path(
+        os.environ.get("MANOPTH_ROOT", ""),
+        "/share_data/guantianrui/manopth",
+        "/root/manopth",
+    )
+
+
+def _default_mediapipe_repo_root() -> str:
+    return _first_existing_path(
+        os.environ.get("MEDIAPIPE_REPO_ROOT", ""),
+        "/share_data/guantianrui/mediapipe",
+        "/root/mediapipe",
+    )
+
+
+def _default_hand_landmarker_task() -> str:
+    return _first_existing_path(
+        os.environ.get("HAND_LANDMARKER_TASK", ""),
+        "/share_data/guantianrui/mediapipe/hand_landmarker.task",
+        "/root/mediapipe/hand_landmarker.task",
+    )
 
 
 @dataclass(frozen=True)
@@ -239,9 +277,9 @@ def load_config(config_path: str | None = None) -> MediaPipeReviewConfig:
         "factory_start": int(root_cfg.get("factory_start", 1)),
         "factory_end": int(root_cfg.get("factory_end", 0)),
         "prefer_installed_mediapipe": True,
-        "hand_landmarker_task": str(Path("/root/mediapipe/hand_landmarker.task")),
-        "mediapipe_repo_root": "/root/mediapipe",
-        "manopth_root": "/root/manopth",
+        "hand_landmarker_task": _default_hand_landmarker_task(),
+        "mediapipe_repo_root": _default_mediapipe_repo_root(),
+        "manopth_root": _default_manopth_root(),
         "mano_models_root": _default_mano_models_root(),
         "clip_context_frames": 60,
         "clip_merge_gap": 15,
