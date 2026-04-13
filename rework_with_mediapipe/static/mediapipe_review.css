@@ -37,8 +37,6 @@ body.mpr-page {
 
 .mpr-actions,
 .mpr-job-row,
-.mpr-choice-group,
-.mpr-badges,
 .mpr-inline {
   display: flex;
   gap: 10px;
@@ -129,36 +127,9 @@ body.mpr-page {
   color: #4b3a28;
 }
 
-.mpr-inline-badge {
-  display: inline-block;
-  min-width: 42px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  color: #fff;
-  font-size: 12px;
-  text-align: center;
-  margin-right: 6px;
-}
-
-.mpr-inline-badge-blue {
-  background: #2563eb;
-}
-
-.mpr-inline-badge-green {
-  background: #0f766e;
-}
-
-.mpr-inline-badge-red {
-  background: #b91c1c;
-}
-
-.mpr-choice-btn.is-selected {
-  background: #214f74;
-  color: #fff;
-}
-
-.mpr-choice-btn.is-muted {
-  background: #b7ab98;
+.mpr-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .mpr-log {
@@ -168,167 +139,6 @@ body.mpr-page {
   background: #201a15;
   color: #f7efe4;
   padding: 14px;
-}
-
-.mpr-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px 20px 0;
-}
-
-.mpr-link {
-  color: #6b4b23;
-}
-
-.mpr-review-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 420px;
-  gap: 20px;
-  padding: 20px;
-}
-
-.mpr-player-card {
-  padding: 16px;
-}
-
-.mpr-viewer-shell {
-  position: relative;
-  width: 100%;
-  min-height: 420px;
-  background: #1a1a1a;
-  border-radius: 16px;
-  overflow: hidden;
-}
-
-#mpr-frame-image,
-#mpr-overlay-canvas {
-  width: 100%;
-  display: block;
-}
-
-#mpr-overlay-canvas {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.mpr-playback-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding-top: 14px;
-}
-
-.mpr-focus-panel {
-  display: grid;
-  gap: 10px;
-  padding-top: 14px;
-}
-
-.mpr-side-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.mpr-side-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-}
-
-.mpr-side-head h2 {
-  margin: 0;
-}
-
-.mpr-selection-summary {
-  margin-top: 12px;
-  padding: 12px;
-  border-radius: 14px;
-  background: #fff8ed;
-  border: 1px solid rgba(84, 61, 30, 0.12);
-  color: #4b3d2b;
-  line-height: 1.45;
-}
-
-.mpr-checkbox-row {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  margin-top: 12px;
-  color: #4b3d2b;
-}
-
-.mpr-checkbox-row input {
-  margin-top: 3px;
-}
-
-.mpr-bad-chip {
-  padding: 8px 12px;
-}
-
-.mpr-candidate-list {
-  display: grid;
-  gap: 10px;
-}
-
-.mpr-candidate-card {
-  border: 1px solid rgba(79, 55, 21, 0.14);
-  border-radius: 14px;
-  padding: 10px;
-  background: #fffaf2;
-}
-
-.mpr-candidate-card.is-left-selected {
-  border-color: rgba(15, 118, 110, 0.5);
-  box-shadow: inset 0 0 0 2px rgba(15, 118, 110, 0.18);
-}
-
-.mpr-candidate-card.is-right-selected {
-  border-color: rgba(185, 28, 28, 0.45);
-  box-shadow: inset 0 0 0 2px rgba(185, 28, 28, 0.15);
-}
-
-.mpr-candidate-card h3 {
-  margin: 0;
-}
-
-.mpr-candidate-card img {
-  width: 100%;
-  border-radius: 10px;
-  display: block;
-}
-
-.mpr-candidate-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.mpr-candidate-head h3 {
-  margin: 0;
-}
-
-.mpr-jump-btn {
-  padding: 8px 10px;
-}
-
-.mpr-quick-left {
-  background: rgba(15, 118, 110, 0.12);
-  color: #0f766e;
-}
-
-.mpr-quick-right {
-  background: rgba(185, 28, 28, 0.12);
-  color: #b91c1c;
-}
-
-.mpr-quick-ignore {
-  background: #efe4d5;
 }
 
 .mpr-meta-note {
@@ -349,15 +159,206 @@ body.mpr-page {
   color: #6d5b48;
 }
 
+.mpr-header {
+  width: min(1280px, calc(100vw - 40px));
+  margin: 20px auto 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.mpr-header-copy {
+  display: grid;
+  gap: 4px;
+  text-align: right;
+}
+
+.mpr-link {
+  color: #6b4b23;
+}
+
+.mpr-review-shell {
+  width: min(1280px, calc(100vw - 40px));
+  margin: 18px auto 32px;
+  display: grid;
+  gap: 18px;
+}
+
+.mpr-player-card {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.mpr-review-topbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.mpr-keyframe-title {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.mpr-keyframe-state {
+  min-width: 112px;
+  text-align: right;
+  font-weight: 600;
+  color: #4b3d2b;
+}
+
+.mpr-viewer-shell {
+  position: relative;
+  width: 100%;
+  min-height: 420px;
+  background: #181614;
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+#mpr-frame-image,
+#mpr-overlay-canvas {
+  width: 100%;
+  display: block;
+}
+
+#mpr-overlay-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+}
+
+.mpr-playback-row {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.mpr-review-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.mpr-checkbox-row {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  color: #4b3d2b;
+}
+
+.mpr-selection-summary {
+  padding: 12px;
+  border-radius: 14px;
+  background: #fff8ed;
+  border: 1px solid rgba(84, 61, 30, 0.12);
+  color: #4b3d2b;
+  line-height: 1.45;
+}
+
+.mpr-submit-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.mpr-strip-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.mpr-strip-head h2 {
+  margin: 0;
+}
+
+.mpr-keyframe-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.mpr-keyframe-chip {
+  border: 1px solid rgba(84, 61, 30, 0.16);
+  border-radius: 16px;
+  background: #fffaf2;
+  padding: 12px;
+  text-align: left;
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+}
+
+.mpr-keyframe-chip.is-current {
+  border-color: rgba(33, 79, 116, 0.5);
+  box-shadow: inset 0 0 0 2px rgba(33, 79, 116, 0.18);
+}
+
+.mpr-keyframe-chip.is-confirmed {
+  background: rgba(15, 118, 110, 0.08);
+  border-color: rgba(15, 118, 110, 0.26);
+}
+
+.mpr-keyframe-chip.is-pending {
+  background: rgba(185, 28, 28, 0.05);
+  border-color: rgba(185, 28, 28, 0.18);
+}
+
+.mpr-chip-topline {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  font-weight: 600;
+}
+
+.mpr-chip-kind {
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  background: #efe4d5;
+  color: #634b2a;
+}
+
+.mpr-chip-reasons {
+  color: #5e513f;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.mpr-chip-state {
+  font-size: 12px;
+  color: #6a5a46;
+}
+
 @media (max-width: 1100px) {
   .mpr-grid,
-  .mpr-review-layout,
   .mpr-hero {
     grid-template-columns: 1fr;
     flex-direction: column;
   }
 
-  .mpr-shell {
+  .mpr-shell,
+  .mpr-header,
+  .mpr-review-shell {
     width: calc(100vw - 24px);
+  }
+
+  .mpr-review-topbar,
+  .mpr-playback-row,
+  .mpr-submit-card,
+  .mpr-strip-head {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .mpr-header-copy {
+    text-align: left;
   }
 }

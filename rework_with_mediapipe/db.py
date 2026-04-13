@@ -300,17 +300,44 @@ def save_vendor_review(
     clip_id: int,
     review_payload: Dict[str, Any],
 ) -> None:
-    left_track_ids = [int(item) for item in review_payload.get("left_track_ids", [])]
-    right_track_ids = [int(item) for item in review_payload.get("right_track_ids", [])]
-    left_missing_box = bool(review_payload.get("left_missing_box", False))
-    right_missing_box = bool(review_payload.get("right_missing_box", False))
-    should_exclude = left_missing_box or right_missing_box
-    payload = {
-        "left_track_ids": left_track_ids,
-        "right_track_ids": right_track_ids,
-        "left_missing_box": left_missing_box,
-        "right_missing_box": right_missing_box,
-    }
+    review_version = str(review_payload.get("review_version") or "")
+    if review_version == "keyframe_v1":
+        keyframe_reviews = list(review_payload.get("keyframe_reviews", []))
+        left_track_ids = sorted(
+            {
+                int(item["left_track_id"])
+                for item in keyframe_reviews
+                if item.get("left_track_id") is not None
+            }
+        )
+        right_track_ids = sorted(
+            {
+                int(item["right_track_id"])
+                for item in keyframe_reviews
+                if item.get("right_track_id") is not None
+            }
+        )
+        left_missing_box = any(bool(item.get("left_missing_box", False)) for item in keyframe_reviews)
+        right_missing_box = any(bool(item.get("right_missing_box", False)) for item in keyframe_reviews)
+        should_exclude = left_missing_box or right_missing_box
+        payload = {
+            "review_version": "keyframe_v1",
+            "keyframe_reviews": keyframe_reviews,
+        }
+        review_confidence = "missing_box" if should_exclude else "keyframe_v1"
+    else:
+        left_track_ids = [int(item) for item in review_payload.get("left_track_ids", [])]
+        right_track_ids = [int(item) for item in review_payload.get("right_track_ids", [])]
+        left_missing_box = bool(review_payload.get("left_missing_box", False))
+        right_missing_box = bool(review_payload.get("right_missing_box", False))
+        should_exclude = left_missing_box or right_missing_box
+        payload = {
+            "left_track_ids": left_track_ids,
+            "right_track_ids": right_track_ids,
+            "left_missing_box": left_missing_box,
+            "right_missing_box": right_missing_box,
+        }
+        review_confidence = "missing_box" if should_exclude else "normal"
     conn.execute(
         """
         INSERT INTO vendor_reviews (clip_id, left_choice, right_choice, merge_answers_json, review_confidence, review_json)
@@ -328,7 +355,7 @@ def save_vendor_review(
             _dumps(left_track_ids),
             _dumps(right_track_ids),
             "[]",
-            "missing_box" if should_exclude else "normal",
+            review_confidence,
             _dumps(payload),
         ),
     )

@@ -161,6 +161,26 @@ class MediaPipeReviewConfig:
         return int(self.raw["frame_stride_for_cards"])
 
     @property
+    def keyframe_motion_center_ratio(self) -> float:
+        return float(self.raw["keyframe_motion_center_ratio"])
+
+    @property
+    def keyframe_motion_area_ratio_high(self) -> float:
+        return float(self.raw["keyframe_motion_area_ratio_high"])
+
+    @property
+    def keyframe_motion_area_ratio_low(self) -> float:
+        return float(self.raw["keyframe_motion_area_ratio_low"])
+
+    @property
+    def keyframe_motion_rotation_deg(self) -> float:
+        return float(self.raw["keyframe_motion_rotation_deg"])
+
+    @property
+    def keyframe_extra_random_min_frames(self) -> int:
+        return int(self.raw["keyframe_extra_random_min_frames"])
+
+    @property
     def detector_max_hands(self) -> int:
         return int(self.raw["detector_max_hands"])
 
@@ -291,6 +311,11 @@ def load_config(config_path: str | None = None) -> MediaPipeReviewConfig:
         "overlap_frames": 30,
         "preview_width": 640,
         "frame_stride_for_cards": 3,
+        "keyframe_motion_center_ratio": 0.18,
+        "keyframe_motion_area_ratio_high": 1.8,
+        "keyframe_motion_area_ratio_low": 0.55,
+        "keyframe_motion_rotation_deg": 50.0,
+        "keyframe_extra_random_min_frames": 72,
         "detector_max_hands": 4,
         "min_detection_confidence": 0.35,
         "min_presence_confidence": 0.35,

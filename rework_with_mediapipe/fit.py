@@ -70,6 +70,196 @@ def _build_side_observation(bundle: Dict, track_id: int) -> Optional[SideObserva
     )
 
 
+def _track_proposal_lookup(bundle: Dict) -> Dict[int, Dict[int, Dict]]:
+    lookup: Dict[int, Dict[int, Dict]] = {}
+    for track in bundle.get("tracks", []):
+        proposal_lookup = {
+            int(item["frame_idx"]): item
+            for item in sorted(track.get("proposals", []), key=lambda item: int(item["frame_idx"]))
+        }
+        lookup[int(track["track_id"])] = proposal_lookup
+    return lookup
+
+
+def _build_side_observation_from_frames(
+    proposal_lookup: Dict[int, Dict[int, Dict]],
+    track_id: int,
+    frame_indices: Sequence[int],
+) -> Optional[SideObservations]:
+    frame_list = [int(frame_idx) for frame_idx in frame_indices]
+    track_proposals = proposal_lookup.get(int(track_id), {})
+    proposals = [track_proposals[frame_idx] for frame_idx in frame_list if frame_idx in track_proposals]
+    if not proposals:
+        return None
+    return SideObservations(
+        track_id=int(track_id),
+        frame_indices=[int(item["frame_idx"]) for item in proposals],
+        landmarks_2d=np.asarray([item["landmarks_2d"] for item in proposals], dtype=np.float32),
+        landmarks_3d=np.asarray([item["landmarks_3d_rel"] for item in proposals], dtype=np.float32),
+    )
+
+
+def _normalize_keyframe_state(review: Dict) -> Dict[str, Optional[int] | bool]:
+    return {
+        "left_track_id": None if review.get("left_track_id") is None else int(review["left_track_id"]),
+        "right_track_id": None if review.get("right_track_id") is None else int(review["right_track_id"]),
+        "left_missing_box": bool(review.get("left_missing_box", False)),
+        "right_missing_box": bool(review.get("right_missing_box", False)),
+    }
+
+
+def _state_signature(state: Dict[str, Optional[int] | bool]) -> tuple:
+    return (
+        state["left_track_id"],
+        state["right_track_id"],
+        bool(state["left_missing_box"]),
+        bool(state["right_missing_box"]),
+    )
+
+
+def _frame_assignments_from_keyframes(bundle: Dict, review: Dict) -> Dict[str, object]:
+    ordered_frames = [int(item["frame_idx"]) for item in bundle.get("frames", [])]
+    if not ordered_frames:
+        return {
+            "left_missing_box": False,
+            "right_missing_box": False,
+            "left_track_ids": [],
+            "right_track_ids": [],
+            "assignment_segments": [],
+            "frame_roles": {},
+        }
+    frame_to_pos = {frame_idx: pos for pos, frame_idx in enumerate(ordered_frames)}
+    keyframe_reviews = {
+        int(item["frame_idx"]): item
+        for item in sorted(review.get("keyframe_reviews", []), key=lambda item: int(item["frame_idx"]))
+    }
+    bundle_keyframes = sorted(bundle.get("keyframes", []), key=lambda item: int(item["frame_idx"]))
+    segments = sorted(bundle.get("segments", []), key=lambda item: int(item["start_frame"]))
+    if not segments:
+        segments = [
+            {
+                "segment_id": 0,
+                "start_frame": int(ordered_frames[0]),
+                "end_frame": int(ordered_frames[-1]),
+            }
+        ]
+        if not bundle_keyframes:
+            bundle_keyframes = [{"frame_idx": int(ordered_frames[0]), "segment_id": 0, "kind": "anchor"}]
+
+    frame_roles: Dict[int, Dict[str, Optional[int] | bool]] = {
+        int(frame_idx): {
+            "left_track_id": None,
+            "right_track_id": None,
+            "left_missing_box": False,
+            "right_missing_box": False,
+        }
+        for frame_idx in ordered_frames
+    }
+    assignment_segments: List[Dict] = []
+    for segment in segments:
+        segment_id = int(segment["segment_id"])
+        segment_start = int(segment["start_frame"])
+        segment_end = int(segment["end_frame"])
+        segment_keyframes = [
+            keyframe_reviews[int(item["frame_idx"])]
+            for item in bundle_keyframes
+            if int(item.get("segment_id", segment_id)) == segment_id and int(item["frame_idx"]) in keyframe_reviews
+        ]
+        if not segment_keyframes:
+            continue
+        segment_keyframes.sort(key=lambda item: int(item["frame_idx"]))
+        current_state = _normalize_keyframe_state(segment_keyframes[0])
+        current_start_pos = frame_to_pos[segment_start]
+        for next_review in segment_keyframes[1:]:
+            next_frame = int(next_review["frame_idx"])
+            next_state = _normalize_keyframe_state(next_review)
+            if _state_signature(next_state) == _state_signature(current_state):
+                continue
+            next_pos = frame_to_pos[next_frame]
+            chunk_end_pos = max(current_start_pos, next_pos - 1)
+            assignment_segments.append(
+                {
+                    "segment_id": segment_id,
+                    "start_frame": int(ordered_frames[current_start_pos]),
+                    "end_frame": int(ordered_frames[chunk_end_pos]),
+                    **current_state,
+                }
+            )
+            current_start_pos = next_pos
+            current_state = next_state
+        assignment_segments.append(
+            {
+                "segment_id": segment_id,
+                "start_frame": int(ordered_frames[current_start_pos]),
+                "end_frame": segment_end,
+                **current_state,
+            }
+        )
+
+    for item in assignment_segments:
+        start_pos = frame_to_pos[int(item["start_frame"])]
+        end_pos = frame_to_pos[int(item["end_frame"])]
+        for pos in range(start_pos, end_pos + 1):
+            frame_roles[int(ordered_frames[pos])] = {
+                "left_track_id": item["left_track_id"],
+                "right_track_id": item["right_track_id"],
+                "left_missing_box": bool(item["left_missing_box"]),
+                "right_missing_box": bool(item["right_missing_box"]),
+            }
+
+    left_missing_box = any(bool(item["left_missing_box"]) for item in assignment_segments)
+    right_missing_box = any(bool(item["right_missing_box"]) for item in assignment_segments)
+    left_track_ids = sorted(
+        {
+            int(item["left_track_id"])
+            for item in assignment_segments
+            if item.get("left_track_id") is not None
+        }
+    )
+    right_track_ids = sorted(
+        {
+            int(item["right_track_id"])
+            for item in assignment_segments
+            if item.get("right_track_id") is not None
+        }
+    )
+    return {
+        "left_missing_box": left_missing_box,
+        "right_missing_box": right_missing_box,
+        "left_track_ids": left_track_ids,
+        "right_track_ids": right_track_ids,
+        "assignment_segments": assignment_segments,
+        "frame_roles": frame_roles,
+    }
+
+
+def _build_side_observations_from_frame_roles(bundle: Dict, frame_roles: Dict[int, Dict[str, Optional[int] | bool]], side: str) -> List[SideObservations]:
+    proposal_lookup = _track_proposal_lookup(bundle)
+    ordered_frames = [int(item["frame_idx"]) for item in bundle.get("frames", [])]
+    observations: List[SideObservations] = []
+    current_track_id: Optional[int] = None
+    current_frames: List[int] = []
+    role_key = f"{side}_track_id"
+    for frame_idx in ordered_frames:
+        role = frame_roles.get(int(frame_idx), {})
+        track_id = role.get(role_key)
+        track_id = None if track_id is None else int(track_id)
+        if current_track_id is not None and track_id == current_track_id:
+            current_frames.append(int(frame_idx))
+            continue
+        if current_track_id is not None and current_frames:
+            obs = _build_side_observation_from_frames(proposal_lookup, current_track_id, current_frames)
+            if obs is not None:
+                observations.append(obs)
+        current_track_id = track_id
+        current_frames = [int(frame_idx)] if track_id is not None else []
+    if current_track_id is not None and current_frames:
+        obs = _build_side_observation_from_frames(proposal_lookup, current_track_id, current_frames)
+        if obs is not None:
+            observations.append(obs)
+    return observations
+
+
 def _fit_similarity_xy(pred_xy, obs_xy):
     pred_center = pred_xy.mean(axis=0, keepdims=True)
     obs_center = obs_xy.mean(axis=0, keepdims=True)
@@ -186,18 +376,33 @@ def _build_side_observations(bundle: Dict, track_ids: Sequence[int]) -> List[Sid
 
 
 def fit_reviewed_clip(bundle: Dict, review: Dict, cfg: MediaPipeReviewConfig) -> Dict:
-    left_track_ids = [int(item) for item in review.get("left_track_ids", [])]
-    right_track_ids = [int(item) for item in review.get("right_track_ids", [])]
-    left_missing_box = bool(review.get("left_missing_box", False))
-    right_missing_box = bool(review.get("right_missing_box", False))
-    left_observations = _build_side_observations(bundle, left_track_ids)
-    right_observations = _build_side_observations(bundle, right_track_ids)
+    review_version = str(review.get("review_version") or "")
+    assignment_segments: List[Dict] = []
+    if review_version == "keyframe_v1":
+        derived = _frame_assignments_from_keyframes(bundle, review)
+        left_track_ids = list(derived["left_track_ids"])
+        right_track_ids = list(derived["right_track_ids"])
+        left_missing_box = bool(derived["left_missing_box"])
+        right_missing_box = bool(derived["right_missing_box"])
+        assignment_segments = list(derived["assignment_segments"])
+        frame_roles = dict(derived["frame_roles"])
+        left_observations = _build_side_observations_from_frame_roles(bundle, frame_roles, "left")
+        right_observations = _build_side_observations_from_frame_roles(bundle, frame_roles, "right")
+    else:
+        left_track_ids = [int(item) for item in review.get("left_track_ids", [])]
+        right_track_ids = [int(item) for item in review.get("right_track_ids", [])]
+        left_missing_box = bool(review.get("left_missing_box", False))
+        right_missing_box = bool(review.get("right_missing_box", False))
+        left_observations = _build_side_observations(bundle, left_track_ids)
+        right_observations = _build_side_observations(bundle, right_track_ids)
     fit = {
         "clip_id": bundle["clip_id"],
+        "review_version": review_version or "legacy_track_v0",
         "left_track_ids": left_track_ids,
         "right_track_ids": right_track_ids,
         "left_missing_box": left_missing_box,
         "right_missing_box": right_missing_box,
+        "assignment_segments": assignment_segments,
         "sides": {
             "left": {"missing_box": left_missing_box, "fragments": []},
             "right": {"missing_box": right_missing_box, "fragments": []},

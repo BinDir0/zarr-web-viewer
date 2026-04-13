@@ -48,186 +48,372 @@ if (dashboardNode) {
 
 if (reviewNode) {
   const clipId = Number(reviewNode.dataset.clipId);
+  const titleNode = document.getElementById("mpr-title");
+  const subtitleNode = document.getElementById("mpr-subtitle");
   const frameImage = document.getElementById("mpr-frame-image");
   const overlayCanvas = document.getElementById("mpr-overlay-canvas");
+  const prevKeyframeButton = document.getElementById("mpr-prev-keyframe");
+  const nextKeyframeButton = document.getElementById("mpr-next-keyframe");
+  const keyframeLabel = document.getElementById("mpr-keyframe-label");
+  const keyframeReasons = document.getElementById("mpr-keyframe-reasons");
+  const keyframeStatus = document.getElementById("mpr-keyframe-status");
+  const prevFrameButton = document.getElementById("mpr-prev-frame");
+  const nextFrameButton = document.getElementById("mpr-next-frame");
   const frameSlider = document.getElementById("mpr-frame-slider");
   const frameLabel = document.getElementById("mpr-frame-label");
   const playToggle = document.getElementById("mpr-play-toggle");
-  const submitButton = document.getElementById("mpr-submit-review");
-  const submitMessage = document.getElementById("mpr-submit-message");
-  const candidateCards = document.getElementById("mpr-candidate-cards");
-  const titleNode = document.getElementById("mpr-title");
-  const leftSummary = document.getElementById("mpr-left-summary");
-  const rightSummary = document.getElementById("mpr-right-summary");
+  const viewerHint = document.getElementById("mpr-viewer-hint");
   const leftMissingBox = document.getElementById("mpr-left-missing-box");
   const rightMissingBox = document.getElementById("mpr-right-missing-box");
-  const leftClear = document.getElementById("mpr-left-clear");
-  const rightClear = document.getElementById("mpr-right-clear");
-  const badFrameChips = document.getElementById("mpr-bad-frame-chips");
-  const focusHint = document.getElementById("mpr-focus-hint");
+  const clearLeftButton = document.getElementById("mpr-clear-left");
+  const clearRightButton = document.getElementById("mpr-clear-right");
+  const confirmButton = document.getElementById("mpr-confirm-keyframe");
+  const assignmentSummary = document.getElementById("mpr-assignment-summary");
+  const keyframeList = document.getElementById("mpr-keyframe-list");
+  const stripSummary = document.getElementById("mpr-strip-summary");
+  const submitButton = document.getElementById("mpr-submit-review");
+  const submitMessage = document.getElementById("mpr-submit-message");
 
   let bundle = null;
-  let currentFrame = 0;
+  let currentFrameIndex = 0;
+  let currentKeyframeIndex = 0;
   let playing = false;
   let timerId = null;
-  const selectedLeft = new Set();
-  const selectedRight = new Set();
+  let drawnBoxes = [];
 
-  function trackRole(trackId) {
-    if (selectedLeft.has(trackId)) return "left";
-    if (selectedRight.has(trackId)) return "right";
-    return "ignore";
+  const frameIndexByFrameIdx = new Map();
+  const frameTracksByFrameIdx = new Map();
+  const keyframeReviewByFrame = new Map();
+
+  function getFrames() {
+    return bundle?.frames || [];
   }
 
-  function setTrackRole(trackId, role) {
-    selectedLeft.delete(trackId);
-    selectedRight.delete(trackId);
-    if (role === "left") selectedLeft.add(trackId);
-    if (role === "right") selectedRight.add(trackId);
-    renderSideSummaries();
-    renderCards();
-    drawFrame(currentFrame);
+  function getKeyframes() {
+    return bundle?.keyframes || [];
   }
 
-  function sortedIds(setLike) {
-    return Array.from(setLike.values()).sort((a, b) => a - b);
+  function getCurrentFrame() {
+    return getFrames()[currentFrameIndex] || null;
   }
 
-  function summaryText(side) {
-    const ids = side === "left" ? sortedIds(selectedLeft) : sortedIds(selectedRight);
-    const missing = side === "left" ? leftMissingBox.checked : rightMissingBox.checked;
-    if (missing && ids.length > 0) {
-      return `已选 Track ${ids.join(", ")}；并标记该侧仍有可见手缺框。`;
+  function getCurrentKeyframe() {
+    return getKeyframes()[currentKeyframeIndex] || null;
+  }
+
+  function ensureReviewEntry(keyframe) {
+    if (!keyframe) return null;
+    const frameIdx = Number(keyframe.frame_idx);
+    let review = keyframeReviewByFrame.get(frameIdx);
+    if (!review) {
+      review = {
+        frame_idx: frameIdx,
+        confirmed: false,
+        left_track_id: null,
+        right_track_id: null,
+        left_missing_box: false,
+        right_missing_box: false,
+      };
+      keyframeReviewByFrame.set(frameIdx, review);
     }
-    if (missing) {
-      return "该侧手可见，但当前 proposal 没有把框打出来。";
-    }
-    if (ids.length > 0) {
-      return `已归到该侧的 Track: ${ids.join(", ")}。`;
-    }
-    return "当前未选任何 Track，默认表示该侧没出现 wearer hand。";
+    return review;
   }
 
-  function renderSideSummaries() {
-    leftSummary.textContent = summaryText("left");
-    rightSummary.textContent = summaryText("right");
+  function getCurrentReview() {
+    return ensureReviewEntry(getCurrentKeyframe());
   }
 
-  function renderBadFrames() {
-    badFrameChips.innerHTML = "";
-    const badFrames = bundle.bad_frame_indices || [];
-    if (badFrames.length === 0) {
-      focusHint.textContent = "这条 clip 没有显式 bad frame 标记，可按整体观看。";
+  function isViewingCurrentKeyframe() {
+    const frame = getCurrentFrame();
+    const keyframe = getCurrentKeyframe();
+    return Boolean(frame && keyframe && Number(frame.frame_idx) === Number(keyframe.frame_idx));
+  }
+
+  function isCurrentSegmentFrame() {
+    const frame = getCurrentFrame();
+    const keyframe = getCurrentKeyframe();
+    return Boolean(frame && keyframe && Number(frame.segment_id) === Number(keyframe.segment_id));
+  }
+
+  function visibleTracksForFrame(frameIdx) {
+    return frameTracksByFrameIdx.get(Number(frameIdx))?.tracks || [];
+  }
+
+  function roleForTrack(trackId) {
+    if (!isCurrentSegmentFrame()) return "neutral";
+    const review = getCurrentReview();
+    if (!review) return "neutral";
+    if (review.left_track_id != null && Number(review.left_track_id) === Number(trackId)) return "left";
+    if (review.right_track_id != null && Number(review.right_track_id) === Number(trackId)) return "right";
+    return "neutral";
+  }
+
+  function frameRoleSummary(review) {
+    if (!review) return "未初始化";
+    const leftLabel = review.left_missing_box
+      ? "左手没框"
+      : review.left_track_id == null
+        ? "左手无保留"
+        : `左手=T${review.left_track_id}`;
+    const rightLabel = review.right_missing_box
+      ? "右手没框"
+      : review.right_track_id == null
+        ? "右手无保留"
+        : `右手=T${review.right_track_id}`;
+    const confirmLabel = review.confirmed ? "已确认" : "未确认";
+    return `${leftLabel} · ${rightLabel} · ${confirmLabel}`;
+  }
+
+  function allConfirmed() {
+    return getKeyframes().every((keyframe) => ensureReviewEntry(keyframe)?.confirmed);
+  }
+
+  function stopPlayback() {
+    playing = false;
+    playToggle.textContent = "播放";
+    if (timerId) {
+      window.clearInterval(timerId);
+      timerId = null;
+    }
+  }
+
+  function setCurrentFrame(frameIndex) {
+    const frames = getFrames();
+    if (!frames.length) return;
+    currentFrameIndex = Math.max(0, Math.min(frameIndex, frames.length - 1));
+    const frame = getCurrentFrame();
+    frameSlider.value = String(currentFrameIndex);
+    frameLabel.textContent = `${currentFrameIndex + 1} / ${frames.length} · frame ${frame.frame_idx}${frame.is_bad ? " · BAD" : ""}${isViewingCurrentKeyframe() ? " · 当前关键帧" : " · 上下文帧"}`;
+    const src = `/mediapipe/assets/${frame.relpath}`;
+    if (frameImage.dataset.src === src && frameImage.complete) {
+      drawOverlay();
       return;
     }
-    focusHint.textContent = `重点检查 bad frames: ${badFrames.join(", ")}`;
-    badFrames.forEach((frameIdx) => {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "mpr-btn mpr-btn-secondary mpr-bad-chip";
-      chip.textContent = `Frame ${frameIdx}`;
-      chip.onclick = () => {
-        const targetIndex = bundle.frames.findIndex((item) => item.frame_idx === frameIdx);
-        if (targetIndex >= 0) drawFrame(targetIndex);
-      };
-      badFrameChips.appendChild(chip);
-    });
-  }
-
-  function drawFrame(frameIndex) {
-    if (!bundle) return;
-    const frame = bundle.frames[frameIndex];
-    if (!frame) return;
-    currentFrame = frameIndex;
-    frameImage.src = `/mediapipe/assets/${frame.relpath}`;
-    frameLabel.textContent = `${frameIndex + 1} / ${bundle.frames.length} · frame ${frame.frame_idx}${frame.is_bad ? " · BAD" : ""}`;
-    frameSlider.value = frameIndex;
+    frameImage.dataset.src = src;
     frameImage.onload = () => {
-      overlayCanvas.width = frameImage.clientWidth;
-      overlayCanvas.height = frameImage.clientHeight;
-      const ctx = overlayCanvas.getContext("2d");
-      const naturalWidth = frameImage.naturalWidth || 1;
-      const naturalHeight = frameImage.naturalHeight || 1;
-      const sx = overlayCanvas.width / naturalWidth;
-      const sy = overlayCanvas.height / naturalHeight;
-      ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-      bundle.tracks.forEach((track) => {
-        const proposal = track.proposals.find((item) => item.frame_idx === frame.frame_idx);
-        if (!proposal) return;
-        const trackId = Number(track.track_id);
-        const role = trackRole(trackId);
-        const color = role === "left" ? "#0f766e" : role === "right" ? "#b91c1c" : "#2563eb";
-        const label = role === "left" ? `L · Track ${trackId}` : role === "right" ? `R · Track ${trackId}` : `Track ${trackId}`;
-        const [x1, y1, x2, y2] = proposal.bbox_xyxy;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = role === "ignore" ? 3 : 4;
-        ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
-        ctx.font = "bold 14px sans-serif";
-        const textWidth = ctx.measureText(label).width;
-        const labelX = x1 * sx;
-        const labelY = Math.max(22, y1 * sy);
-        ctx.fillStyle = color;
-        ctx.fillRect(labelX, labelY - 18, textWidth + 14, 22);
-        ctx.fillStyle = "#ffffff";
-        ctx.fillText(label, labelX + 7, labelY - 3);
-      });
+      drawOverlay();
     };
+    frameImage.src = src;
   }
 
-  function renderCards() {
-    candidateCards.innerHTML = "";
-    const cards = bundle.track_cards || [];
-    if (cards.length === 0) {
-      candidateCards.innerHTML = `<div class="mpr-meta-note">当前 clip 没有任何候选 Track。若某侧确实可见，请勾选“该侧可见但缺框”。</div>`;
+  function selectKeyframe(index) {
+    const keyframes = getKeyframes();
+    if (!keyframes.length) return;
+    currentKeyframeIndex = Math.max(0, Math.min(index, keyframes.length - 1));
+    const keyframe = getCurrentKeyframe();
+    const frameIndex = frameIndexByFrameIdx.get(Number(keyframe.frame_idx)) ?? 0;
+    setCurrentFrame(frameIndex);
+    renderReviewState();
+  }
+
+  function assignmentForSide(side) {
+    const review = getCurrentReview();
+    if (!review) return;
+    review.confirmed = false;
+    if (side === "left") {
+      review.left_track_id = null;
+      review.left_missing_box = false;
+    } else {
+      review.right_track_id = null;
+      review.right_missing_box = false;
+    }
+    renderReviewState();
+    drawOverlay();
+  }
+
+  function setMissingBox(side, checked) {
+    const review = getCurrentReview();
+    if (!review) return;
+    review.confirmed = false;
+    if (side === "left") {
+      review.left_missing_box = checked;
+      if (checked) review.left_track_id = null;
+    } else {
+      review.right_missing_box = checked;
+      if (checked) review.right_track_id = null;
+    }
+    renderReviewState();
+    drawOverlay();
+  }
+
+  function assignTrack(side, trackId) {
+    if (!isViewingCurrentKeyframe()) {
+      submitMessage.textContent = "请先切回当前关键帧再标注，普通帧只用于查看上下文。";
       return;
     }
-    cards.forEach((card) => {
-      const trackId = Number(card.track_id);
-      const role = trackRole(trackId);
-      const node = document.createElement("article");
-      node.className = "mpr-candidate-card";
-      if (role === "left") node.classList.add("is-left-selected");
-      if (role === "right") node.classList.add("is-right-selected");
-      node.innerHTML = `
-        <img src="/mediapipe/assets/${card.preview_relpath}" alt="track preview">
-        <div class="mpr-candidate-head">
-          <h3>Track ${trackId}</h3>
-          <button class="mpr-btn mpr-btn-secondary mpr-jump-btn" type="button">跳到参考帧</button>
+    const review = getCurrentReview();
+    if (!review) return;
+    review.confirmed = false;
+    if (side === "left") {
+      review.left_missing_box = false;
+      review.left_track_id = review.left_track_id != null && Number(review.left_track_id) === Number(trackId) ? null : Number(trackId);
+      if (review.right_track_id != null && Number(review.right_track_id) === Number(trackId)) review.right_track_id = null;
+    } else {
+      review.right_missing_box = false;
+      review.right_track_id = review.right_track_id != null && Number(review.right_track_id) === Number(trackId) ? null : Number(trackId);
+      if (review.left_track_id != null && Number(review.left_track_id) === Number(trackId)) review.left_track_id = null;
+    }
+    renderReviewState();
+    drawOverlay();
+  }
+
+  function confirmCurrentKeyframe() {
+    const review = getCurrentReview();
+    if (!review) return;
+    review.confirmed = true;
+    renderReviewState();
+  }
+
+  function renderReviewState() {
+    const keyframe = getCurrentKeyframe();
+    const review = getCurrentReview();
+    if (!keyframe || !review) return;
+    const reasons = (keyframe.reasons || []).join(" · ") || "无特殊原因";
+    const segmentFrames = (bundle.segments || []).find((item) => Number(item.segment_id) === Number(keyframe.segment_id));
+    keyframeLabel.textContent = `关键帧 ${currentKeyframeIndex + 1}/${getKeyframes().length} · frame ${keyframe.frame_idx}`;
+    keyframeReasons.textContent = `原因: ${reasons}${segmentFrames ? ` · 段 ${segmentFrames.start_frame}-${segmentFrames.end_frame}` : ""}`;
+    keyframeStatus.textContent = review.confirmed ? "已确认" : "待确认";
+    leftMissingBox.checked = Boolean(review.left_missing_box);
+    rightMissingBox.checked = Boolean(review.right_missing_box);
+    confirmButton.textContent = review.confirmed ? "重新确认当前关键帧" : "确认当前关键帧";
+    assignmentSummary.textContent = frameRoleSummary(review);
+    viewerHint.textContent = isViewingCurrentKeyframe()
+      ? "当前就是关键帧，可以直接在图上点框。左键=左手，右键=右手，再点一次同侧可清空。"
+      : `当前显示的是上下文帧 ${getCurrentFrame()?.frame_idx ?? ""}，只有关键帧 ${keyframe.frame_idx} 可提交标注。`;
+    stripSummary.textContent = `${getKeyframes().filter((item) => ensureReviewEntry(item)?.confirmed).length}/${getKeyframes().length} 已确认`;
+    submitButton.disabled = !allConfirmed();
+    prevKeyframeButton.disabled = currentKeyframeIndex <= 0;
+    nextKeyframeButton.disabled = currentKeyframeIndex >= getKeyframes().length - 1;
+    renderKeyframeList();
+  }
+
+  function renderKeyframeList() {
+    keyframeList.innerHTML = "";
+    getKeyframes().forEach((keyframe, index) => {
+      const review = ensureReviewEntry(keyframe);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mpr-keyframe-chip";
+      button.classList.add(review?.confirmed ? "is-confirmed" : "is-pending");
+      if (index === currentKeyframeIndex) button.classList.add("is-current");
+      const reasonText = (keyframe.reasons || []).join(" · ") || "普通覆盖";
+      button.innerHTML = `
+        <div class="mpr-chip-topline">
+          <span>frame ${keyframe.frame_idx}</span>
+          <span class="mpr-chip-kind">${keyframe.kind === "anchor" ? "anchor" : "coverage"}</span>
         </div>
-        <div class="mpr-inline">
-          ${card.intersects_bad_frames ? '<span class="mpr-badge bad">触及 bad frame</span>' : '<span class="mpr-badge">上下文候选</span>'}
-          <span class="mpr-badge">${card.role_hint}</span>
-        </div>
-        <div class="mpr-meta-note">来源: MediaPipe VIDEO · ${card.handedness_label} · slot ${card.side_rank}</div>
-        <div class="mpr-meta-note">frames ${card.start_frame}-${card.end_frame} · ${card.num_frames} 帧</div>
-        <div class="mpr-inline">
-          <button class="mpr-btn mpr-choice-btn mpr-quick-left" type="button">归到左手</button>
-          <button class="mpr-btn mpr-choice-btn mpr-quick-right" type="button">归到右手</button>
-          <button class="mpr-btn mpr-btn-secondary mpr-quick-ignore" type="button">忽略</button>
-        </div>
+        <div class="mpr-chip-reasons">${reasonText}</div>
+        <div class="mpr-chip-state">${frameRoleSummary(review)}</div>
       `;
-      node.querySelector(".mpr-jump-btn").onclick = () => {
-        const targetIndex = bundle.frames.findIndex((item) => item.frame_idx === card.preview_frame);
-        if (targetIndex >= 0) drawFrame(targetIndex);
+      button.onclick = () => {
+        stopPlayback();
+        selectKeyframe(index);
       };
-      node.querySelector(".mpr-quick-left").onclick = () => setTrackRole(trackId, "left");
-      node.querySelector(".mpr-quick-right").onclick = () => setTrackRole(trackId, "right");
-      node.querySelector(".mpr-quick-ignore").onclick = () => setTrackRole(trackId, "ignore");
-      candidateCards.appendChild(node);
+      keyframeList.appendChild(button);
     });
+  }
+
+  function drawOverlay() {
+    const frame = getCurrentFrame();
+    if (!frame || !frameImage.complete) return;
+    overlayCanvas.width = frameImage.clientWidth;
+    overlayCanvas.height = frameImage.clientHeight;
+    const ctx = overlayCanvas.getContext("2d");
+    const naturalWidth = frameImage.naturalWidth || 1;
+    const naturalHeight = frameImage.naturalHeight || 1;
+    const sx = overlayCanvas.width / naturalWidth;
+    const sy = overlayCanvas.height / naturalHeight;
+    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    drawnBoxes = [];
+    visibleTracksForFrame(frame.frame_idx).forEach((track) => {
+      const trackId = Number(track.track_id);
+      const role = roleForTrack(trackId);
+      const color = role === "left" ? "#0f766e" : role === "right" ? "#b91c1c" : "#2563eb";
+      const label = role === "left" ? `L · T${trackId}` : role === "right" ? `R · T${trackId}` : `T${trackId}`;
+      const [x1, y1, x2, y2] = track.bbox_xyxy;
+      const left = x1 * sx;
+      const top = y1 * sy;
+      const width = (x2 - x1) * sx;
+      const height = (y2 - y1) * sy;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = role === "neutral" ? 3 : 5;
+      ctx.strokeRect(left, top, width, height);
+      ctx.font = "bold 15px sans-serif";
+      const textWidth = ctx.measureText(label).width;
+      const labelX = left;
+      const labelY = Math.max(24, top);
+      ctx.fillStyle = color;
+      ctx.fillRect(labelX, labelY - 20, textWidth + 16, 24);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(label, labelX + 8, labelY - 4);
+      drawnBoxes.push({
+        track_id: trackId,
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+        area: width * height,
+      });
+    });
+  }
+
+  function jumpFrame(delta) {
+    stopPlayback();
+    setCurrentFrame(currentFrameIndex + delta);
+    renderReviewState();
+  }
+
+  function togglePlayback() {
+    if (!bundle) return;
+    if (playing) {
+      stopPlayback();
+      return;
+    }
+    playing = true;
+    playToggle.textContent = "暂停";
+    const keyframe = getCurrentKeyframe();
+    timerId = window.setInterval(() => {
+      const frames = getFrames();
+      const current = getCurrentFrame();
+      if (!current || !keyframe) return;
+      let nextIndex = currentFrameIndex + 1;
+      if (
+        nextIndex >= frames.length
+        || Number(frames[nextIndex].segment_id) !== Number(keyframe.segment_id)
+      ) {
+        nextIndex = frameIndexByFrameIdx.get(Number(keyframe.frame_idx)) ?? currentFrameIndex;
+      }
+      setCurrentFrame(nextIndex);
+      renderReviewState();
+    }, 150);
+  }
+
+  function buildPayload() {
+    return {
+      review_version: "keyframe_v1",
+      keyframe_reviews: getKeyframes().map((keyframe) => {
+        const review = ensureReviewEntry(keyframe);
+        return {
+          frame_idx: Number(review.frame_idx),
+          confirmed: Boolean(review.confirmed),
+          left_track_id: review.left_track_id == null ? null : Number(review.left_track_id),
+          right_track_id: review.right_track_id == null ? null : Number(review.right_track_id),
+          left_missing_box: Boolean(review.left_missing_box),
+          right_missing_box: Boolean(review.right_missing_box),
+        };
+      }),
+    };
   }
 
   async function submitReview() {
-    const payload = {
-      left_track_ids: sortedIds(selectedLeft),
-      right_track_ids: sortedIds(selectedRight),
-      left_missing_box: leftMissingBox.checked,
-      right_missing_box: rightMissingBox.checked,
-    };
+    if (!allConfirmed()) {
+      submitMessage.textContent = "还有关键帧未确认，不能提交。";
+      return;
+    }
     const response = await fetch(`/api/mediapipe/clips/${clipId}/submit-review`, {
       method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(payload),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildPayload()),
     });
     const data = await response.json();
     if (!response.ok || !data.success) {
@@ -241,27 +427,61 @@ if (reviewNode) {
     submitMessage.textContent = "提交成功，没有更多 ready clip。";
   }
 
-  function togglePlayback() {
-    playing = !playing;
-    playToggle.textContent = playing ? "暂停" : "播放";
-    if (!playing) {
-      if (timerId) window.clearInterval(timerId);
-      timerId = null;
-      return;
-    }
-    timerId = window.setInterval(() => {
-      const nextFrame = (currentFrame + 1) % bundle.frames.length;
-      drawFrame(nextFrame);
-    }, 140);
-  }
-
   function hydrateFromExistingReview(reviewPayload) {
     if (!reviewPayload || typeof reviewPayload !== "object") return;
-    (reviewPayload.left_track_ids || []).forEach((item) => selectedLeft.add(Number(item)));
-    (reviewPayload.right_track_ids || []).forEach((item) => selectedRight.add(Number(item)));
-    leftMissingBox.checked = Boolean(reviewPayload.left_missing_box);
-    rightMissingBox.checked = Boolean(reviewPayload.right_missing_box);
+    if (String(reviewPayload.review_version || "") !== "keyframe_v1") return;
+    (reviewPayload.keyframe_reviews || []).forEach((item) => {
+      const frameIdx = Number(item.frame_idx);
+      keyframeReviewByFrame.set(frameIdx, {
+        frame_idx: frameIdx,
+        confirmed: Boolean(item.confirmed),
+        left_track_id: item.left_track_id == null ? null : Number(item.left_track_id),
+        right_track_id: item.right_track_id == null ? null : Number(item.right_track_id),
+        left_missing_box: Boolean(item.left_missing_box),
+        right_missing_box: Boolean(item.right_missing_box),
+      });
+    });
   }
+
+  overlayCanvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
+
+  overlayCanvas.addEventListener("mousedown", (event) => {
+    if (event.button !== 0 && event.button !== 2) return;
+    event.preventDefault();
+    const rect = overlayCanvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const candidates = drawnBoxes
+      .filter((item) => x >= item.left && x <= item.right && y >= item.top && y <= item.bottom)
+      .sort((a, b) => a.area - b.area);
+    if (!candidates.length) return;
+    assignTrack(event.button === 0 ? "left" : "right", candidates[0].track_id);
+  });
+
+  leftMissingBox.onchange = () => setMissingBox("left", leftMissingBox.checked);
+  rightMissingBox.onchange = () => setMissingBox("right", rightMissingBox.checked);
+  clearLeftButton.onclick = () => assignmentForSide("left");
+  clearRightButton.onclick = () => assignmentForSide("right");
+  confirmButton.onclick = confirmCurrentKeyframe;
+  prevKeyframeButton.onclick = () => {
+    stopPlayback();
+    selectKeyframe(currentKeyframeIndex - 1);
+  };
+  nextKeyframeButton.onclick = () => {
+    stopPlayback();
+    selectKeyframe(currentKeyframeIndex + 1);
+  };
+  prevFrameButton.onclick = () => jumpFrame(-1);
+  nextFrameButton.onclick = () => jumpFrame(1);
+  playToggle.onclick = togglePlayback;
+  frameSlider.oninput = (event) => {
+    stopPlayback();
+    setCurrentFrame(Number(event.target.value));
+    renderReviewState();
+  };
+  submitButton.onclick = submitReview;
 
   async function boot() {
     const response = await fetch(`/api/mediapipe/clips/${clipId}`);
@@ -271,34 +491,23 @@ if (reviewNode) {
       titleNode.textContent = "这个 clip 还没有可用的 bundle。";
       return;
     }
+    if (!getKeyframes().length) {
+      titleNode.textContent = "这个 clip 没有可审核的关键帧。";
+      return;
+    }
+    getFrames().forEach((frame, index) => {
+      frameIndexByFrameIdx.set(Number(frame.frame_idx), index);
+    });
+    (bundle.frame_tracks || []).forEach((item) => {
+      frameTracksByFrameIdx.set(Number(item.frame_idx), item);
+    });
     titleNode.textContent = `${bundle.episode_name} · frames ${bundle.clip_start}-${bundle.clip_end}`;
+    subtitleNode.textContent = `${bundle.dirty_reason} · ${getKeyframes().length} 个关键帧 · ${(bundle.segments || []).length} 个稳定段`;
     hydrateFromExistingReview(data.clip?.review_payload_json);
-    leftMissingBox.onchange = renderSideSummaries;
-    rightMissingBox.onchange = renderSideSummaries;
-    leftClear.onclick = () => {
-      selectedLeft.clear();
-      renderSideSummaries();
-      renderCards();
-      drawFrame(currentFrame);
-    };
-    rightClear.onclick = () => {
-      selectedRight.clear();
-      renderSideSummaries();
-      renderCards();
-      drawFrame(currentFrame);
-    };
-    frameSlider.max = Math.max(bundle.frames.length - 1, 0);
-    frameSlider.oninput = (event) => drawFrame(Number(event.target.value));
-    playToggle.onclick = togglePlayback;
-    submitButton.onclick = submitReview;
-    renderBadFrames();
-    renderSideSummaries();
-    renderCards();
-    const firstBadFrame = (bundle.bad_frame_indices || [])[0];
-    const firstIndex = firstBadFrame === undefined
-      ? 0
-      : Math.max(0, bundle.frames.findIndex((item) => item.frame_idx === firstBadFrame));
-    drawFrame(firstIndex);
+    frameSlider.max = String(Math.max(getFrames().length - 1, 0));
+    const firstPending = getKeyframes().findIndex((keyframe) => !ensureReviewEntry(keyframe)?.confirmed);
+    currentKeyframeIndex = firstPending >= 0 ? firstPending : 0;
+    selectKeyframe(currentKeyframeIndex);
   }
 
   boot().catch((error) => {

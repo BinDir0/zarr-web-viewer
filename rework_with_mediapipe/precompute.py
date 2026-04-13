@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import numpy as np
 from PIL import Image
@@ -214,6 +215,236 @@ def _build_mediapipe_tracks(
     return tracks
 
 
+def _wrap_angle_diff_deg(prev_angle: float, curr_angle: float) -> float:
+    delta = abs(curr_angle - prev_angle)
+    while delta > math.pi:
+        delta -= 2.0 * math.pi
+    return abs(math.degrees(delta))
+
+
+def _bbox_center(bbox_xyxy: List[float]) -> Tuple[float, float]:
+    x1, y1, x2, y2 = bbox_xyxy
+    return ((x1 + x2) * 0.5, (y1 + y2) * 0.5)
+
+
+def _bbox_area(bbox_xyxy: List[float]) -> float:
+    x1, y1, x2, y2 = bbox_xyxy
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def _build_frame_tracks(
+    frame_indices: List[int],
+    tracks: List[Dict],
+) -> Tuple[List[Dict], Dict[int, Set[int]]]:
+    per_frame: Dict[int, List[Dict]] = {int(frame_idx): [] for frame_idx in frame_indices}
+    visible_ids: Dict[int, Set[int]] = {int(frame_idx): set() for frame_idx in frame_indices}
+    for track in tracks:
+        track_id = int(track["track_id"])
+        for proposal in track["proposals"]:
+            frame_idx = int(proposal["frame_idx"])
+            if frame_idx not in per_frame:
+                continue
+            item = {
+                "track_id": track_id,
+                "bbox_xyxy": proposal["bbox_xyxy"],
+                "score": float(proposal["score"]),
+                "handedness_label": str(proposal["handedness_label"]),
+                "side_rank": int(proposal["side_rank"]),
+                "roi_rotation_2d": float(proposal["roi_rotation_2d"]),
+            }
+            per_frame[frame_idx].append(item)
+            visible_ids[frame_idx].add(track_id)
+    frame_tracks: List[Dict] = []
+    for frame_idx in frame_indices:
+        proposals = sorted(per_frame.get(frame_idx, []), key=lambda item: int(item["track_id"]))
+        frame_tracks.append(
+            {
+                "frame_idx": int(frame_idx),
+                "visible_track_ids": [int(item["track_id"]) for item in proposals],
+                "tracks": proposals,
+            }
+        )
+    return frame_tracks, visible_ids
+
+
+def _compute_motion_scores(
+    tracks: List[Dict],
+    frame_indices: List[int],
+    image_size: Tuple[int, int],
+    cfg: MediaPipeReviewConfig,
+) -> Tuple[Dict[int, float], Dict[int, Set[str]]]:
+    frame_scores = {int(frame_idx): 0.0 for frame_idx in frame_indices}
+    boundary_reasons: Dict[int, Set[str]] = defaultdict(set)
+    width, height = image_size
+    diag = max(math.hypot(float(width), float(height)), 1.0)
+    for track in tracks:
+        proposals = sorted(track["proposals"], key=lambda item: int(item["frame_idx"]))
+        prev = None
+        for proposal in proposals:
+            frame_idx = int(proposal["frame_idx"])
+            if prev is None:
+                prev = proposal
+                continue
+            prev_center = _bbox_center(prev["bbox_xyxy"])
+            curr_center = _bbox_center(proposal["bbox_xyxy"])
+            center_ratio = math.hypot(curr_center[0] - prev_center[0], curr_center[1] - prev_center[1]) / diag
+            prev_area = max(_bbox_area(prev["bbox_xyxy"]), 1.0)
+            curr_area = max(_bbox_area(proposal["bbox_xyxy"]), 1.0)
+            area_ratio = curr_area / prev_area
+            rot_delta_deg = _wrap_angle_diff_deg(float(prev["roi_rotation_2d"]), float(proposal["roi_rotation_2d"]))
+            score = center_ratio + abs(math.log(area_ratio)) + (rot_delta_deg / 180.0)
+            frame_scores[frame_idx] = max(float(frame_scores.get(frame_idx, 0.0)), float(score))
+            if (
+                center_ratio >= cfg.keyframe_motion_center_ratio
+                or area_ratio >= cfg.keyframe_motion_area_ratio_high
+                or area_ratio <= cfg.keyframe_motion_area_ratio_low
+                or rot_delta_deg >= cfg.keyframe_motion_rotation_deg
+            ):
+                boundary_reasons[frame_idx].add("motion_jump")
+            prev = proposal
+    return frame_scores, boundary_reasons
+
+
+def _build_segments_and_keyframes(
+    *,
+    clip: ClipRef,
+    frame_indices: List[int],
+    frame_tracks: List[Dict],
+    visible_track_ids: Dict[int, Set[int]],
+    motion_scores: Dict[int, float],
+    motion_reasons: Dict[int, Set[str]],
+    cfg: MediaPipeReviewConfig,
+) -> Tuple[List[Dict], List[Dict], Dict[int, int]]:
+    if not frame_indices:
+        return [], [], {}
+
+    frame_track_map = {int(item["frame_idx"]): item for item in frame_tracks}
+    boundary_reasons: Dict[int, Set[str]] = defaultdict(set)
+    boundary_reasons[int(frame_indices[0])].add("clip_start")
+    boundary_reasons[int(frame_indices[-1])].add("clip_end")
+
+    bad_frames = {int(frame_idx) for frame_idx in clip.bad_frames}
+    previous_visible: Set[int] | None = None
+    previous_signature: Tuple[Tuple[str, int], ...] | None = None
+    for frame_idx in frame_indices:
+        if frame_idx in bad_frames:
+            boundary_reasons[frame_idx].add("bad_frame")
+        visible = set(visible_track_ids.get(frame_idx, set()))
+        signature = tuple(
+            sorted(
+                (str(track["handedness_label"]), int(track["side_rank"]))
+                for track in frame_track_map.get(frame_idx, {}).get("tracks", [])
+            )
+        )
+        if previous_visible is not None and visible != previous_visible:
+            boundary_reasons[frame_idx].add("track_set_changed")
+        if previous_signature is not None and signature != previous_signature:
+            boundary_reasons[frame_idx].add("hand_signature_changed")
+        previous_visible = visible
+        previous_signature = signature
+
+    for frame_idx, reasons in motion_reasons.items():
+        boundary_reasons[int(frame_idx)].update(reasons)
+
+    positions = {int(frame_idx): pos for pos, frame_idx in enumerate(frame_indices)}
+    last_position = max(len(frame_indices) - 1, 0)
+    boundary_positions = sorted(
+        {
+            positions[frame_idx]
+            for frame_idx in boundary_reasons.keys()
+            if frame_idx in positions and positions[frame_idx] < last_position
+        }
+    )
+    if 0 not in boundary_positions:
+        boundary_positions.insert(0, 0)
+
+    segments: List[Dict] = []
+    keyframes: List[Dict] = []
+    frame_to_segment: Dict[int, int] = {}
+    for segment_id, start_pos in enumerate(boundary_positions):
+        end_pos = boundary_positions[segment_id + 1] - 1 if segment_id + 1 < len(boundary_positions) else len(frame_indices) - 1
+        segment_frames = frame_indices[start_pos : end_pos + 1]
+        start_frame = int(segment_frames[0])
+        end_frame = int(segment_frames[-1])
+        for frame_idx in segment_frames:
+            frame_to_segment[int(frame_idx)] = segment_id
+        visible = sorted(visible_track_ids.get(start_frame, set()))
+        segment = {
+            "segment_id": segment_id,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "anchor_frame_idx": start_frame,
+            "visible_track_ids": visible,
+            "boundary_reasons": sorted(boundary_reasons.get(start_frame, set())),
+        }
+        segments.append(segment)
+        keyframes.append(
+            {
+                "frame_idx": start_frame,
+                "relpath": "",
+                "segment_id": segment_id,
+                "kind": "anchor",
+                "reasons": sorted(boundary_reasons.get(start_frame, set())),
+                "visible_track_ids": visible,
+            }
+        )
+
+        candidate_frames = [int(frame_idx) for frame_idx in segment_frames[1:] if visible_track_ids.get(int(frame_idx), set())]
+        if candidate_frames:
+            motion_pick = max(candidate_frames, key=lambda item: (float(motion_scores.get(item, 0.0)), -item))
+            if float(motion_scores.get(motion_pick, 0.0)) > 0.0:
+                keyframes.append(
+                    {
+                        "frame_idx": motion_pick,
+                        "relpath": "",
+                        "segment_id": segment_id,
+                        "kind": "coverage",
+                        "reasons": ["motion_coverage"],
+                        "visible_track_ids": sorted(visible_track_ids.get(motion_pick, set())),
+                    }
+                )
+        if len(segment_frames) > cfg.keyframe_extra_random_min_frames:
+            pool = [int(frame_idx) for frame_idx in segment_frames[1:] if visible_track_ids.get(int(frame_idx), set())]
+            taken = {int(item["frame_idx"]) for item in keyframes if int(item["segment_id"]) == segment_id}
+            pool = [item for item in pool if item not in taken]
+            if pool:
+                seed = f"{clip.episode.episode_id}|{clip.clip_start}|{clip.clip_end}|{clip.dirty_reason}|{segment_id}"
+                pick_index = int(hashlib.sha1(seed.encode("utf-8")).hexdigest(), 16) % len(pool)
+                random_pick = int(pool[pick_index])
+                keyframes.append(
+                    {
+                        "frame_idx": random_pick,
+                        "relpath": "",
+                        "segment_id": segment_id,
+                        "kind": "coverage",
+                        "reasons": ["deterministic_sample"],
+                        "visible_track_ids": sorted(visible_track_ids.get(random_pick, set())),
+                    }
+                )
+
+    deduped_keyframes: Dict[int, Dict] = {}
+    for item in keyframes:
+        frame_idx = int(item["frame_idx"])
+        existing = deduped_keyframes.get(frame_idx)
+        if existing is None:
+            deduped_keyframes[frame_idx] = item
+            continue
+        merged_reasons = sorted(set(existing.get("reasons", [])) | set(item.get("reasons", [])))
+        kind = "anchor" if existing.get("kind") == "anchor" or item.get("kind") == "anchor" else "coverage"
+        deduped_keyframes[frame_idx] = {
+            **existing,
+            **item,
+            "kind": kind,
+            "reasons": merged_reasons,
+        }
+
+    ordered_keyframes = sorted(
+        deduped_keyframes.values(),
+        key=lambda item: (int(item["frame_idx"]), 0 if item["kind"] == "anchor" else 1),
+    )
+    return segments, ordered_keyframes, frame_to_segment
+
+
 class MediaPipeProposalDetector:
     def __init__(self, cfg: MediaPipeReviewConfig):
         mp, mp_python, vision = _ensure_mediapipe(cfg)
@@ -307,23 +538,6 @@ def _save_review_frame(image: Image.Image, output_path: Path) -> None:
     image.save(output_path, format="JPEG", quality=80)
 
 
-def _track_card(track: Dict, frames_relpaths: Dict[int, str]) -> Dict:
-    preview_frame = int(track["preview_frame"])
-    return {
-        "track_id": int(track["track_id"]),
-        "role_hint": track["role_hint"],
-        "score": track["score"],
-        "start_frame": track["start_frame"],
-        "end_frame": track["end_frame"],
-        "num_frames": track["num_frames"],
-        "intersects_bad_frames": bool(track.get("intersects_bad_frames", False)),
-        "handedness_label": str(track.get("handedness_label", "unknown")),
-        "side_rank": int(track.get("side_rank", 0)),
-        "preview_frame": preview_frame,
-        "preview_relpath": frames_relpaths[preview_frame],
-    }
-
-
 def _save_proposals_npz(
     bundle_dir: Path,
     per_frame_proposals: Dict[int, List[Proposal]],
@@ -413,6 +627,22 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
 
     proposals_npz_path = _save_proposals_npz(bundle_dir, per_frame_proposals, chain_lookup)
     bad_frame_lookup = {int(frame_idx) for frame_idx in clip.bad_frames}
+    ordered_frame_indices = sorted(frames_relpaths.keys())
+    frame_tracks, visible_track_ids = _build_frame_tracks(ordered_frame_indices, visible_tracks)
+    motion_scores, motion_reasons = _compute_motion_scores(visible_tracks, ordered_frame_indices, image_size, cfg)
+    segments, keyframes, frame_to_segment = _build_segments_and_keyframes(
+        clip=clip,
+        frame_indices=ordered_frame_indices,
+        frame_tracks=frame_tracks,
+        visible_track_ids=visible_track_ids,
+        motion_scores=motion_scores,
+        motion_reasons=motion_reasons,
+        cfg=cfg,
+    )
+    for item in frame_tracks:
+        item["segment_id"] = int(frame_to_segment.get(int(item["frame_idx"]), -1))
+    for item in keyframes:
+        item["relpath"] = frames_relpaths[int(item["frame_idx"])]
     bundle = {
         "clip_id": clip_id,
         "episode_id": clip.episode.episode_id,
@@ -430,11 +660,15 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
                 "frame_idx": frame_idx,
                 "relpath": frames_relpaths[frame_idx],
                 "is_bad": frame_idx in bad_frame_lookup,
+                "segment_id": int(frame_to_segment.get(frame_idx, -1)),
+                "visible_track_ids": sorted(visible_track_ids.get(frame_idx, set())),
             }
-            for frame_idx in sorted(frames_relpaths.keys())
+            for frame_idx in ordered_frame_indices
         ],
+        "frame_tracks": frame_tracks,
+        "segments": segments,
+        "keyframes": keyframes,
         "tracks": visible_tracks,
-        "track_cards": [_track_card(track, frames_relpaths) for track in visible_tracks],
     }
     with (bundle_dir / "bundle.json").open("w", encoding="utf-8") as f:
         json.dump(bundle, f, ensure_ascii=False, indent=2)

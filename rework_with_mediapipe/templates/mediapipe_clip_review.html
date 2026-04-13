@@ -10,66 +10,73 @@
     <div id="mpr-review-app" data-clip-id="{{ clip_id }}">
       <header class="mpr-header">
         <a class="mpr-link" href="{{ url_for('mediapipe_review.dashboard') }}">返回 Dashboard</a>
-        <div id="mpr-title">Loading clip {{ clip_id }}...</div>
+        <div class="mpr-header-copy">
+          <div id="mpr-title">Loading clip {{ clip_id }}...</div>
+          <div id="mpr-subtitle" class="mpr-meta-note"></div>
+        </div>
       </header>
-      <main class="mpr-review-layout">
+      <main class="mpr-review-shell">
         <section class="mpr-player-card">
+          <div class="mpr-review-topbar">
+            <div class="mpr-inline">
+              <button id="mpr-prev-keyframe" class="mpr-btn mpr-btn-secondary" type="button">上一关键帧</button>
+              <button id="mpr-next-keyframe" class="mpr-btn mpr-btn-secondary" type="button">下一关键帧</button>
+            </div>
+            <div>
+              <div id="mpr-keyframe-label" class="mpr-keyframe-title"></div>
+              <div id="mpr-keyframe-reasons" class="mpr-meta-note"></div>
+            </div>
+            <div id="mpr-keyframe-status" class="mpr-keyframe-state"></div>
+          </div>
+
           <div class="mpr-viewer-shell">
             <img id="mpr-frame-image" alt="frame">
             <canvas id="mpr-overlay-canvas"></canvas>
           </div>
+
           <div class="mpr-playback-row">
-            <button id="mpr-play-toggle" class="mpr-btn mpr-btn-primary">播放</button>
+            <button id="mpr-prev-frame" class="mpr-btn mpr-btn-secondary" type="button">上一帧</button>
+            <button id="mpr-play-toggle" class="mpr-btn mpr-btn-secondary" type="button">播放</button>
+            <button id="mpr-next-frame" class="mpr-btn mpr-btn-secondary" type="button">下一帧</button>
             <input id="mpr-frame-slider" type="range" min="0" max="0" value="0">
             <span id="mpr-frame-label">0 / 0</span>
           </div>
-          <section class="mpr-focus-panel">
-            <div id="mpr-focus-hint" class="mpr-meta-note">正在加载重点帧…</div>
-            <div id="mpr-bad-frame-chips" class="mpr-inline"></div>
-          </section>
-        </section>
-        <aside class="mpr-side-panel">
-          <section class="mpr-card">
-            <h2>审核规则</h2>
-            <div class="mpr-instructions">
-              <div><span class="mpr-inline-badge mpr-inline-badge-blue">Track</span> 蓝框是可选候选，编号全局固定。</div>
-              <div><span class="mpr-inline-badge mpr-inline-badge-green">左手</span> 选给 wearer-left 后变绿。</div>
-              <div><span class="mpr-inline-badge mpr-inline-badge-red">右手</span> 选给 wearer-right 后变红。</div>
-              <div>不属于 wearer 的手直接忽略，不单独做别的标记。</div>
-              <div>如果该侧手可见但 proposal 没给出可用框，请勾“该侧可见但缺框”。</div>
+
+          <section class="mpr-review-controls">
+            <div id="mpr-viewer-hint" class="mpr-meta-note">
+              左键点框=wearer 左手；右键点框=wearer 右手；再次点同侧可清空。只有关键帧可标注，普通帧只用于查看上下文。
             </div>
-          </section>
-          <section class="mpr-card">
-            <div class="mpr-side-head">
-              <h2>佩戴者左手</h2>
-              <button id="mpr-left-clear" class="mpr-btn mpr-btn-secondary" type="button">清空左手</button>
+            <div class="mpr-inline">
+              <label class="mpr-checkbox-row">
+                <input id="mpr-left-missing-box" type="checkbox">
+                <span>左手可见但没框</span>
+              </label>
+              <label class="mpr-checkbox-row">
+                <input id="mpr-right-missing-box" type="checkbox">
+                <span>右手可见但没框</span>
+              </label>
             </div>
-            <div id="mpr-left-summary" class="mpr-selection-summary"></div>
-            <label class="mpr-checkbox-row">
-              <input id="mpr-left-missing-box" type="checkbox">
-              <span>左手可见，但没有被 proposal 打上框</span>
-            </label>
-          </section>
-          <section class="mpr-card">
-            <div class="mpr-side-head">
-              <h2>佩戴者右手</h2>
-              <button id="mpr-right-clear" class="mpr-btn mpr-btn-secondary" type="button">清空右手</button>
+            <div class="mpr-inline">
+              <button id="mpr-clear-left" class="mpr-btn mpr-btn-secondary" type="button">清空左手</button>
+              <button id="mpr-clear-right" class="mpr-btn mpr-btn-secondary" type="button">清空右手</button>
+              <button id="mpr-confirm-keyframe" class="mpr-btn mpr-btn-primary" type="button">确认当前关键帧</button>
             </div>
-            <div id="mpr-right-summary" class="mpr-selection-summary"></div>
-            <label class="mpr-checkbox-row">
-              <input id="mpr-right-missing-box" type="checkbox">
-              <span>右手可见，但没有被 proposal 打上框</span>
-            </label>
+            <div id="mpr-assignment-summary" class="mpr-selection-summary"></div>
           </section>
-          <section class="mpr-card">
-            <h2>候选 Track</h2>
-            <div id="mpr-candidate-cards" class="mpr-candidate-list"></div>
-          </section>
-          <section class="mpr-card">
-            <button id="mpr-submit-review" class="mpr-btn mpr-btn-primary mpr-full-width">提交</button>
+
+          <section class="mpr-card mpr-submit-card">
+            <button id="mpr-submit-review" class="mpr-btn mpr-btn-primary" type="button">提交整条 Clip</button>
             <div id="mpr-submit-message" class="mpr-meta-note"></div>
           </section>
-        </aside>
+        </section>
+
+        <section class="mpr-card">
+          <div class="mpr-strip-head">
+            <h2>关键帧</h2>
+            <div id="mpr-strip-summary" class="mpr-meta-note"></div>
+          </div>
+          <div id="mpr-keyframe-list" class="mpr-keyframe-list"></div>
+        </section>
       </main>
     </div>
     <script src="{{ url_for('mediapipe_review.static', filename='mediapipe_review.js') }}"></script>
