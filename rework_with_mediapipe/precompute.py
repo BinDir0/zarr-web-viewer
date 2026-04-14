@@ -310,6 +310,7 @@ def _build_segments_and_keyframes(
     clip: ClipRef,
     frame_indices: List[int],
     frame_tracks: List[Dict],
+    tracks: List[Dict],
     visible_track_ids: Dict[int, Set[int]],
     motion_scores: Dict[int, float],
     motion_reasons: Dict[int, Set[str]],
@@ -324,8 +325,10 @@ def _build_segments_and_keyframes(
     boundary_reasons[int(frame_indices[-1])].add("clip_end")
 
     bad_frames = {int(frame_idx) for frame_idx in clip.bad_frames}
+    frame_to_pos = {int(frame_idx): pos for pos, frame_idx in enumerate(frame_indices)}
     previous_visible: Set[int] | None = None
     previous_signature: Tuple[Tuple[str, int], ...] | None = None
+    previous_frame_idx: int | None = None
     for frame_idx in frame_indices:
         if frame_idx in bad_frames:
             boundary_reasons[frame_idx].add("bad_frame")
@@ -338,21 +341,39 @@ def _build_segments_and_keyframes(
         )
         if previous_visible is not None and visible != previous_visible:
             boundary_reasons[frame_idx].add("track_set_changed")
+            if previous_frame_idx is not None:
+                boundary_reasons[previous_frame_idx].add("track_set_changed_before")
         if previous_signature is not None and signature != previous_signature:
             boundary_reasons[frame_idx].add("hand_signature_changed")
+            if previous_frame_idx is not None:
+                boundary_reasons[previous_frame_idx].add("hand_signature_changed_before")
         previous_visible = visible
         previous_signature = signature
+        previous_frame_idx = int(frame_idx)
+
+    for track in tracks:
+        start_frame = int(track["start_frame"])
+        end_frame = int(track["end_frame"])
+        if start_frame in frame_to_pos:
+            boundary_reasons[start_frame].add("track_appeared")
+        if end_frame in frame_to_pos:
+            boundary_reasons[end_frame].add("track_disappeared")
+        prev_pos = frame_to_pos.get(start_frame)
+        if prev_pos is not None and prev_pos > 0:
+            boundary_reasons[frame_indices[prev_pos - 1]].add("before_track_appeared")
+        next_pos = frame_to_pos.get(end_frame)
+        if next_pos is not None and next_pos + 1 < len(frame_indices):
+            boundary_reasons[frame_indices[next_pos + 1]].add("after_track_disappeared")
 
     for frame_idx, reasons in motion_reasons.items():
         boundary_reasons[int(frame_idx)].update(reasons)
 
-    positions = {int(frame_idx): pos for pos, frame_idx in enumerate(frame_indices)}
     last_position = max(len(frame_indices) - 1, 0)
     boundary_positions = sorted(
         {
-            positions[frame_idx]
+            frame_to_pos[frame_idx]
             for frame_idx in boundary_reasons.keys()
-            if frame_idx in positions and positions[frame_idx] < last_position
+            if frame_idx in frame_to_pos and frame_to_pos[frame_idx] < last_position
         }
     )
     if 0 not in boundary_positions:
@@ -634,6 +655,7 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
         clip=clip,
         frame_indices=ordered_frame_indices,
         frame_tracks=frame_tracks,
+        tracks=visible_tracks,
         visible_track_ids=visible_track_ids,
         motion_scores=motion_scores,
         motion_reasons=motion_reasons,

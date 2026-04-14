@@ -57,11 +57,6 @@ if (reviewNode) {
   const keyframeLabel = document.getElementById("mpr-keyframe-label");
   const keyframeReasons = document.getElementById("mpr-keyframe-reasons");
   const keyframeStatus = document.getElementById("mpr-keyframe-status");
-  const prevFrameButton = document.getElementById("mpr-prev-frame");
-  const nextFrameButton = document.getElementById("mpr-next-frame");
-  const frameSlider = document.getElementById("mpr-frame-slider");
-  const frameLabel = document.getElementById("mpr-frame-label");
-  const playToggle = document.getElementById("mpr-play-toggle");
   const viewerHint = document.getElementById("mpr-viewer-hint");
   const leftMissingBox = document.getElementById("mpr-left-missing-box");
   const rightMissingBox = document.getElementById("mpr-right-missing-box");
@@ -75,26 +70,18 @@ if (reviewNode) {
   const submitMessage = document.getElementById("mpr-submit-message");
 
   let bundle = null;
-  let currentFrameIndex = 0;
   let currentKeyframeIndex = 0;
-  let playing = false;
-  let timerId = null;
   let drawnBoxes = [];
 
-  const frameIndexByFrameIdx = new Map();
   const frameTracksByFrameIdx = new Map();
   const keyframeReviewByFrame = new Map();
-
-  function getFrames() {
-    return bundle?.frames || [];
-  }
 
   function getKeyframes() {
     return bundle?.keyframes || [];
   }
 
   function getCurrentFrame() {
-    return getFrames()[currentFrameIndex] || null;
+    return getCurrentKeyframe() || null;
   }
 
   function getCurrentKeyframe() {
@@ -123,24 +110,11 @@ if (reviewNode) {
     return ensureReviewEntry(getCurrentKeyframe());
   }
 
-  function isViewingCurrentKeyframe() {
-    const frame = getCurrentFrame();
-    const keyframe = getCurrentKeyframe();
-    return Boolean(frame && keyframe && Number(frame.frame_idx) === Number(keyframe.frame_idx));
-  }
-
-  function isCurrentSegmentFrame() {
-    const frame = getCurrentFrame();
-    const keyframe = getCurrentKeyframe();
-    return Boolean(frame && keyframe && Number(frame.segment_id) === Number(keyframe.segment_id));
-  }
-
   function visibleTracksForFrame(frameIdx) {
     return frameTracksByFrameIdx.get(Number(frameIdx))?.tracks || [];
   }
 
   function roleForTrack(trackId) {
-    if (!isCurrentSegmentFrame()) return "neutral";
     const review = getCurrentReview();
     if (!review) return "neutral";
     if (review.left_track_id != null && Number(review.left_track_id) === Number(trackId)) return "left";
@@ -168,22 +142,9 @@ if (reviewNode) {
     return getKeyframes().every((keyframe) => ensureReviewEntry(keyframe)?.confirmed);
   }
 
-  function stopPlayback() {
-    playing = false;
-    playToggle.textContent = "播放";
-    if (timerId) {
-      window.clearInterval(timerId);
-      timerId = null;
-    }
-  }
-
-  function setCurrentFrame(frameIndex) {
-    const frames = getFrames();
-    if (!frames.length) return;
-    currentFrameIndex = Math.max(0, Math.min(frameIndex, frames.length - 1));
+  function renderCurrentKeyframeImage() {
     const frame = getCurrentFrame();
-    frameSlider.value = String(currentFrameIndex);
-    frameLabel.textContent = `${currentFrameIndex + 1} / ${frames.length} · frame ${frame.frame_idx}${frame.is_bad ? " · BAD" : ""}${isViewingCurrentKeyframe() ? " · 当前关键帧" : " · 上下文帧"}`;
+    if (!frame) return;
     const src = `/mediapipe/assets/${frame.relpath}`;
     if (frameImage.dataset.src === src && frameImage.complete) {
       drawOverlay();
@@ -200,9 +161,7 @@ if (reviewNode) {
     const keyframes = getKeyframes();
     if (!keyframes.length) return;
     currentKeyframeIndex = Math.max(0, Math.min(index, keyframes.length - 1));
-    const keyframe = getCurrentKeyframe();
-    const frameIndex = frameIndexByFrameIdx.get(Number(keyframe.frame_idx)) ?? 0;
-    setCurrentFrame(frameIndex);
+    renderCurrentKeyframeImage();
     renderReviewState();
   }
 
@@ -237,10 +196,6 @@ if (reviewNode) {
   }
 
   function assignTrack(side, trackId) {
-    if (!isViewingCurrentKeyframe()) {
-      submitMessage.textContent = "请先切回当前关键帧再标注，普通帧只用于查看上下文。";
-      return;
-    }
     const review = getCurrentReview();
     if (!review) return;
     review.confirmed = false;
@@ -277,9 +232,7 @@ if (reviewNode) {
     rightMissingBox.checked = Boolean(review.right_missing_box);
     confirmButton.textContent = review.confirmed ? "重新确认当前关键帧" : "确认当前关键帧";
     assignmentSummary.textContent = frameRoleSummary(review);
-    viewerHint.textContent = isViewingCurrentKeyframe()
-      ? "当前就是关键帧，可以直接在图上点框。左键=左手，右键=右手，再点一次同侧可清空。"
-      : `当前显示的是上下文帧 ${getCurrentFrame()?.frame_idx ?? ""}，只有关键帧 ${keyframe.frame_idx} 可提交标注。`;
+    viewerHint.textContent = "当前页面只显示关键帧。左键=左手，右键=右手，再点一次同侧可清空。";
     stripSummary.textContent = `${getKeyframes().filter((item) => ensureReviewEntry(item)?.confirmed).length}/${getKeyframes().length} 已确认`;
     submitButton.disabled = !allConfirmed();
     prevKeyframeButton.disabled = currentKeyframeIndex <= 0;
@@ -306,7 +259,6 @@ if (reviewNode) {
         <div class="mpr-chip-state">${frameRoleSummary(review)}</div>
       `;
       button.onclick = () => {
-        stopPlayback();
         selectKeyframe(index);
       };
       keyframeList.appendChild(button);
@@ -355,37 +307,6 @@ if (reviewNode) {
         area: width * height,
       });
     });
-  }
-
-  function jumpFrame(delta) {
-    stopPlayback();
-    setCurrentFrame(currentFrameIndex + delta);
-    renderReviewState();
-  }
-
-  function togglePlayback() {
-    if (!bundle) return;
-    if (playing) {
-      stopPlayback();
-      return;
-    }
-    playing = true;
-    playToggle.textContent = "暂停";
-    const keyframe = getCurrentKeyframe();
-    timerId = window.setInterval(() => {
-      const frames = getFrames();
-      const current = getCurrentFrame();
-      if (!current || !keyframe) return;
-      let nextIndex = currentFrameIndex + 1;
-      if (
-        nextIndex >= frames.length
-        || Number(frames[nextIndex].segment_id) !== Number(keyframe.segment_id)
-      ) {
-        nextIndex = frameIndexByFrameIdx.get(Number(keyframe.frame_idx)) ?? currentFrameIndex;
-      }
-      setCurrentFrame(nextIndex);
-      renderReviewState();
-    }, 150);
   }
 
   function buildPayload() {
@@ -466,20 +387,10 @@ if (reviewNode) {
   clearRightButton.onclick = () => assignmentForSide("right");
   confirmButton.onclick = confirmCurrentKeyframe;
   prevKeyframeButton.onclick = () => {
-    stopPlayback();
     selectKeyframe(currentKeyframeIndex - 1);
   };
   nextKeyframeButton.onclick = () => {
-    stopPlayback();
     selectKeyframe(currentKeyframeIndex + 1);
-  };
-  prevFrameButton.onclick = () => jumpFrame(-1);
-  nextFrameButton.onclick = () => jumpFrame(1);
-  playToggle.onclick = togglePlayback;
-  frameSlider.oninput = (event) => {
-    stopPlayback();
-    setCurrentFrame(Number(event.target.value));
-    renderReviewState();
   };
   submitButton.onclick = submitReview;
 
@@ -495,16 +406,12 @@ if (reviewNode) {
       titleNode.textContent = "这个 clip 没有可审核的关键帧。";
       return;
     }
-    getFrames().forEach((frame, index) => {
-      frameIndexByFrameIdx.set(Number(frame.frame_idx), index);
-    });
     (bundle.frame_tracks || []).forEach((item) => {
       frameTracksByFrameIdx.set(Number(item.frame_idx), item);
     });
     titleNode.textContent = `${bundle.episode_name} · frames ${bundle.clip_start}-${bundle.clip_end}`;
     subtitleNode.textContent = `${bundle.dirty_reason} · ${getKeyframes().length} 个关键帧 · ${(bundle.segments || []).length} 个稳定段`;
     hydrateFromExistingReview(data.clip?.review_payload_json);
-    frameSlider.max = String(Math.max(getFrames().length - 1, 0));
     const firstPending = getKeyframes().findIndex((keyframe) => !ensureReviewEntry(keyframe)?.confirmed);
     currentKeyframeIndex = firstPending >= 0 ? firstPending : 0;
     selectKeyframe(currentKeyframeIndex);
