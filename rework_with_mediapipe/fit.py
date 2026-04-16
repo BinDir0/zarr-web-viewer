@@ -126,6 +126,9 @@ def _frame_assignments_from_keyframes(bundle: Dict, review: Dict) -> Dict[str, o
             "left_track_ids": [],
             "right_track_ids": [],
             "assignment_segments": [],
+            "kept_segments": [],
+            "dropped_segments": [],
+            "valid_frame_ranges": [],
             "frame_roles": {},
         }
     frame_to_pos = {frame_idx: pos for pos, frame_idx in enumerate(ordered_frames)}
@@ -146,12 +149,16 @@ def _frame_assignments_from_keyframes(bundle: Dict, review: Dict) -> Dict[str, o
         if not bundle_keyframes:
             bundle_keyframes = [{"frame_idx": int(ordered_frames[0]), "segment_id": 0, "kind": "anchor"}]
 
+    default_role = {
+        "left_track_id": None,
+        "right_track_id": None,
+        "left_missing_box": False,
+        "right_missing_box": False,
+        "dropped": False,
+    }
     frame_roles: Dict[int, Dict[str, Optional[int] | bool]] = {
         int(frame_idx): {
-            "left_track_id": None,
-            "right_track_id": None,
-            "left_missing_box": False,
-            "right_missing_box": False,
+            **default_role,
         }
         for frame_idx in ordered_frames
     }
@@ -196,7 +203,17 @@ def _frame_assignments_from_keyframes(bundle: Dict, review: Dict) -> Dict[str, o
             }
         )
 
+    dropped_segments: List[Dict] = []
+    kept_segments: List[Dict] = []
+    valid_frame_ranges: List[List[int]] = []
     for item in assignment_segments:
+        is_dropped = bool(item["left_missing_box"]) or bool(item["right_missing_box"])
+        segment_payload = {**item, "dropped": is_dropped}
+        if is_dropped:
+            dropped_segments.append(segment_payload)
+        else:
+            kept_segments.append(segment_payload)
+            valid_frame_ranges.append([int(item["start_frame"]), int(item["end_frame"])])
         start_pos = frame_to_pos[int(item["start_frame"])]
         end_pos = frame_to_pos[int(item["end_frame"])]
         for pos in range(start_pos, end_pos + 1):
@@ -205,6 +222,7 @@ def _frame_assignments_from_keyframes(bundle: Dict, review: Dict) -> Dict[str, o
                 "right_track_id": item["right_track_id"],
                 "left_missing_box": bool(item["left_missing_box"]),
                 "right_missing_box": bool(item["right_missing_box"]),
+                "dropped": is_dropped,
             }
 
     left_missing_box = any(bool(item["left_missing_box"]) for item in assignment_segments)
@@ -229,6 +247,9 @@ def _frame_assignments_from_keyframes(bundle: Dict, review: Dict) -> Dict[str, o
         "left_track_ids": left_track_ids,
         "right_track_ids": right_track_ids,
         "assignment_segments": assignment_segments,
+        "kept_segments": kept_segments,
+        "dropped_segments": dropped_segments,
+        "valid_frame_ranges": valid_frame_ranges,
         "frame_roles": frame_roles,
     }
 
@@ -242,7 +263,10 @@ def _build_side_observations_from_frame_roles(bundle: Dict, frame_roles: Dict[in
     role_key = f"{side}_track_id"
     for frame_idx in ordered_frames:
         role = frame_roles.get(int(frame_idx), {})
-        track_id = role.get(role_key)
+        if bool(role.get("dropped", False)):
+            track_id = None
+        else:
+            track_id = role.get(role_key)
         track_id = None if track_id is None else int(track_id)
         if current_track_id is not None and track_id == current_track_id:
             current_frames.append(int(frame_idx))
@@ -385,6 +409,9 @@ def fit_reviewed_clip(bundle: Dict, review: Dict, cfg: MediaPipeReviewConfig) ->
         left_missing_box = bool(derived["left_missing_box"])
         right_missing_box = bool(derived["right_missing_box"])
         assignment_segments = list(derived["assignment_segments"])
+        kept_segments = list(derived["kept_segments"])
+        dropped_segments = list(derived["dropped_segments"])
+        valid_frame_ranges = list(derived["valid_frame_ranges"])
         frame_roles = dict(derived["frame_roles"])
         left_observations = _build_side_observations_from_frame_roles(bundle, frame_roles, "left")
         right_observations = _build_side_observations_from_frame_roles(bundle, frame_roles, "right")
@@ -393,6 +420,9 @@ def fit_reviewed_clip(bundle: Dict, review: Dict, cfg: MediaPipeReviewConfig) ->
         right_track_ids = [int(item) for item in review.get("right_track_ids", [])]
         left_missing_box = bool(review.get("left_missing_box", False))
         right_missing_box = bool(review.get("right_missing_box", False))
+        kept_segments = []
+        dropped_segments = []
+        valid_frame_ranges = []
         left_observations = _build_side_observations(bundle, left_track_ids)
         right_observations = _build_side_observations(bundle, right_track_ids)
     fit = {
@@ -403,22 +433,25 @@ def fit_reviewed_clip(bundle: Dict, review: Dict, cfg: MediaPipeReviewConfig) ->
         "left_missing_box": left_missing_box,
         "right_missing_box": right_missing_box,
         "assignment_segments": assignment_segments,
+        "kept_segments": kept_segments,
+        "dropped_segments": dropped_segments,
+        "valid_frame_ranges": valid_frame_ranges,
         "sides": {
             "left": {"missing_box": left_missing_box, "fragments": []},
             "right": {"missing_box": right_missing_box, "fragments": []},
         },
     }
-    if left_missing_box or right_missing_box:
-        fit["status"] = "qa_needed_missing_box"
-        fit["message"] = "At least one wearer hand is visible but missing a proposal track."
-        return fit
     for obs in left_observations:
         fit["sides"]["left"]["fragments"].append(fit_side("left", obs, cfg))
     for obs in right_observations:
         fit["sides"]["right"]["fragments"].append(fit_side("right", obs, cfg))
     if not fit["sides"]["left"]["fragments"] and not fit["sides"]["right"]["fragments"]:
-        fit["status"] = "fit_ok_negative"
-        fit["message"] = "No wearer hand visible in this clip."
+        if dropped_segments:
+            fit["status"] = "qa_needed_missing_box"
+            fit["message"] = "All usable frames were dropped because at least one governing keyframe had a missing proposal."
+        else:
+            fit["status"] = "fit_ok_negative"
+            fit["message"] = "No wearer hand visible in this clip."
         fit["median_reproj_error"] = 0.0
         fit["p95_reproj_error"] = 0.0
         return fit
@@ -435,6 +468,8 @@ def fit_reviewed_clip(bundle: Dict, review: Dict, cfg: MediaPipeReviewConfig) ->
         if median_err <= cfg.max_median_reproj_error_px and p95_err <= cfg.max_p95_reproj_error_px
         else "fit_failed"
     )
+    if dropped_segments:
+        fit["message"] = "Some governed frame ranges were dropped because a keyframe was marked missing_box."
     return fit
 
 
@@ -495,6 +530,12 @@ def _flatten_side_fragments(side_payload: Optional[Dict], prefix: str, arrays: D
     arrays[prefix + "reproj_error"] = np.concatenate(reproj_error, axis=0) if reproj_error else np.zeros((0,), dtype=np.float32)
 
 
+def _ranges_array(ranges: Sequence[Sequence[int]]) -> np.ndarray:
+    if not ranges:
+        return np.zeros((0, 2), dtype=np.int32)
+    return np.asarray([[int(item[0]), int(item[1])] for item in ranges], dtype=np.int32)
+
+
 def save_fit_artifacts(bundle_dir: Path, fit_payload: Dict) -> Dict[str, str]:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     json_path = bundle_dir / "fit.json"
@@ -506,6 +547,10 @@ def save_fit_artifacts(bundle_dir: Path, fit_payload: Dict) -> Dict[str, str]:
     for side in ("left", "right"):
         prefix = f"{side}_"
         _flatten_side_fragments(fit_payload.get("sides", {}).get(side), prefix, arrays)
+    arrays["valid_frame_ranges"] = _ranges_array(fit_payload.get("valid_frame_ranges", []))
+    arrays["dropped_frame_ranges"] = _ranges_array(
+        [[int(item["start_frame"]), int(item["end_frame"])] for item in fit_payload.get("dropped_segments", [])]
+    )
     arrays["median_reproj_error"] = np.asarray([fit_payload.get("median_reproj_error", 0.0)], dtype=np.float32)
     arrays["p95_reproj_error"] = np.asarray([fit_payload.get("p95_reproj_error", 0.0)], dtype=np.float32)
     np.savez_compressed(npz_path, **arrays)

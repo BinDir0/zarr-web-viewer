@@ -319,12 +319,13 @@ def save_vendor_review(
         )
         left_missing_box = any(bool(item.get("left_missing_box", False)) for item in keyframe_reviews)
         right_missing_box = any(bool(item.get("right_missing_box", False)) for item in keyframe_reviews)
-        should_exclude = left_missing_box or right_missing_box
+        has_missing_box = left_missing_box or right_missing_box
         payload = {
             "review_version": "keyframe_v1",
             "keyframe_reviews": keyframe_reviews,
         }
-        review_confidence = "missing_box" if should_exclude else "keyframe_v1"
+        review_confidence = "partial_missing_box" if has_missing_box else "keyframe_v1"
+        should_exclude = False
     else:
         left_track_ids = [int(item) for item in review_payload.get("left_track_ids", [])]
         right_track_ids = [int(item) for item in review_payload.get("right_track_ids", [])]
