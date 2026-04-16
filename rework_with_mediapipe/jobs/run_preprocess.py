@@ -12,7 +12,7 @@ from ..types import ClipRef, EpisodeRef
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Discover dirty clips and precompute MediaPipe review bundles.")
+    parser = argparse.ArgumentParser(description="Discover dirty clips and precompute YOLO review bundles.")
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--discover", action="store_true")
     parser.add_argument("--process", action="store_true")

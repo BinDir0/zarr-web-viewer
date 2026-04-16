@@ -43,14 +43,15 @@ def init_runtime() -> MediaPipeReviewConfig:
 
 
 def _dependency_status(cfg: MediaPipeReviewConfig) -> Dict[str, Any]:
+    ultralytics_available = importlib.util.find_spec("ultralytics") is not None or cfg.ultralytics_repo_root.exists()
     return {
         "python3": True,
-        "mediapipe": importlib.util.find_spec("mediapipe") is not None,
+        "ultralytics": ultralytics_available,
         "torch": importlib.util.find_spec("torch") is not None,
         "cv2": importlib.util.find_spec("cv2") is not None,
         "pillow": importlib.util.find_spec("PIL") is not None,
-        "hand_landmarker_task": cfg.hand_landmarker_task.exists(),
-        "mano_models_root": cfg.mano_models_root.exists(),
+        "ultralytics_repo_root": cfg.ultralytics_repo_root.exists(),
+        "yolo_model_path": cfg.yolo_model_path.exists(),
     }
 
 
@@ -69,8 +70,8 @@ def _summary_payload(cfg: MediaPipeReviewConfig) -> Dict[str, Any]:
             "db_path": str(cfg.db_path),
             "artifacts_dir": str(cfg.artifacts_dir),
             "source_annotations_db": str(cfg.source_annotations_db),
-            "hand_landmarker_task": str(cfg.hand_landmarker_task),
-            "mano_models_root": str(cfg.mano_models_root),
+            "ultralytics_repo_root": str(cfg.ultralytics_repo_root),
+            "yolo_model_path": str(cfg.raw.get("yolo_model_path", "") or ""),
         },
         "dependencies": _dependency_status(cfg),
     }

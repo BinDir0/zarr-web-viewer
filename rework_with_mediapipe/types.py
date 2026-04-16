@@ -46,16 +46,13 @@ class ClipRef:
 class Proposal:
     frame_idx: int
     det_idx: int
+    track_id: int
     bbox_xyxy: List[float]
+    bbox_xyxy_orig: List[float]
     score: float
-    handedness_score: float
-    handedness_label: str
-    side_rank: int
-    landmarks_2d: List[List[float]]
-    landmarks_3d_rel: List[List[float]]
+    class_id: int
+    class_name: str
     roi_rotation_2d: float
-    palm_normal: List[float]
-    wrist_frame: List[List[float]]
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -11,7 +11,7 @@ from ..fit import fit_reviewed_clip, save_fit_artifacts
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fit MANO after review and export manifest.")
+    parser = argparse.ArgumentParser(description="Aggregate reviewed box tracks and export manifest.")
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--export", action="store_true")

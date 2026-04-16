@@ -59,6 +59,26 @@ def _default_mediapipe_repo_root() -> str:
     )
 
 
+def _default_ultralytics_repo_root() -> str:
+    return _first_existing_path(
+        os.environ.get("ULTRALYTICS_REPO_ROOT", ""),
+        "/root/ultralytics",
+        "/share_data/guantianrui/ultralytics",
+    )
+
+
+def _default_yolo_model_path() -> str:
+    return _first_existing_path(
+        os.environ.get("YOLO_MODEL_PATH", ""),
+        "/share_data/guantianrui/EgoYOLO/detector.pt",
+        "/share_data/guantianrui/EgoYOLO/best.pt",
+        "/root/ultralytics/detector.pt",
+        "/root/ultralytics/best.pt",
+        "/root/ultralytics/weights/detector.pt",
+        "/root/ultralytics/weights/best.pt",
+    )
+
+
 def _default_hand_landmarker_task() -> str:
     return _first_existing_path(
         os.environ.get("HAND_LANDMARKER_TASK", ""),
@@ -125,8 +145,45 @@ class MediaPipeReviewConfig:
         return bool(self.raw.get("prefer_installed_mediapipe", True))
 
     @property
+    def prefer_installed_ultralytics(self) -> bool:
+        return bool(self.raw.get("prefer_installed_ultralytics", True))
+
+    @property
     def mediapipe_repo_root(self) -> Path:
         return Path(str(self.raw["mediapipe_repo_root"]))
+
+    @property
+    def ultralytics_repo_root(self) -> Path:
+        return Path(str(self.raw["ultralytics_repo_root"]))
+
+    @property
+    def yolo_model_path(self) -> Path:
+        raw_value = str(self.raw.get("yolo_model_path", "") or "")
+        return Path(raw_value) if raw_value else Path("/__missing_yolo_model__")
+
+    @property
+    def yolo_tracker_config(self) -> str:
+        return str(self.raw["yolo_tracker_config"])
+
+    @property
+    def yolo_device(self) -> str:
+        return str(self.raw.get("yolo_device", ""))
+
+    @property
+    def yolo_confidence(self) -> float:
+        return float(self.raw["yolo_confidence"])
+
+    @property
+    def yolo_iou(self) -> float:
+        return float(self.raw["yolo_iou"])
+
+    @property
+    def yolo_max_det(self) -> int:
+        return int(self.raw["yolo_max_det"])
+
+    @property
+    def yolo_imgsz(self) -> int:
+        return int(self.raw["yolo_imgsz"])
 
     @property
     def manopth_root(self) -> Path:
@@ -301,8 +358,17 @@ def load_config(config_path: str | None = None) -> MediaPipeReviewConfig:
         "factory_start": int(root_cfg.get("factory_start", 1)),
         "factory_end": int(root_cfg.get("factory_end", 0)),
         "prefer_installed_mediapipe": True,
+        "prefer_installed_ultralytics": True,
         "hand_landmarker_task": _default_hand_landmarker_task(),
         "mediapipe_repo_root": _default_mediapipe_repo_root(),
+        "ultralytics_repo_root": _default_ultralytics_repo_root(),
+        "yolo_model_path": _default_yolo_model_path(),
+        "yolo_tracker_config": "bytetrack.yaml",
+        "yolo_device": "",
+        "yolo_confidence": 0.05,
+        "yolo_iou": 0.60,
+        "yolo_max_det": 6,
+        "yolo_imgsz": 1280,
         "manopth_root": _default_manopth_root(),
         "mano_models_root": _default_mano_models_root(),
         "clip_context_frames": 60,
