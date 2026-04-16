@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.metadata
 import json
 import math
 import sys
+from contextlib import contextmanager
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
@@ -16,8 +19,32 @@ from .frame_sources import make_frame_source
 from .types import ClipRef, Proposal
 
 
+@contextmanager
+def _torchvision_metadata_compat():
+    original_version = importlib.metadata.version
+
+    def _patched_version(name: str) -> str:
+        try:
+            return original_version(name)
+        except importlib.metadata.PackageNotFoundError:
+            if name != "torchvision":
+                raise
+            module = importlib.import_module("torchvision")
+            module_version = getattr(module, "__version__", None)
+            if not module_version:
+                raise
+            return str(module_version)
+
+    importlib.metadata.version = _patched_version
+    try:
+        yield
+    finally:
+        importlib.metadata.version = original_version
+
+
 def _import_ultralytics_modules():
-    from ultralytics import YOLO  # type: ignore
+    with _torchvision_metadata_compat():
+        from ultralytics import YOLO  # type: ignore
 
     return YOLO
 
@@ -36,6 +63,14 @@ def _ensure_ultralytics(cfg: MediaPipeReviewConfig):
     try:
         return _import_ultralytics_modules()
     except Exception as exc:  # pragma: no cover - import surface differs by env
+        root_cause = exc.__cause__ or exc
+        if isinstance(root_cause, importlib.metadata.PackageNotFoundError) and "torchvision" in str(root_cause):
+            raise RuntimeError(
+                "当前环境导入 ultralytics 时读取不到 torchvision 的包 metadata。"
+                "如果 torchvision 已经能 import，这个兼容层本应自动兜底；"
+                "若仍失败，请先在同一个环境里安装/重装 torchvision。"
+                f" 当前解释器: {sys.executable}。"
+            ) from exc
         if first_error is not None:
             raise RuntimeError(
                 "缺少可用的 ultralytics/YOLO Python 依赖。"
@@ -91,12 +126,8 @@ class UltralyticsProposalDetector:
     def close(self) -> None:
         return None
 
-    def detect_sequence(self, frames: List[Dict[str, Any]]) -> Dict[int, List[Proposal]]:
-        if not frames:
-            return {}
-
+    def _build_track_kwargs(self) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
-            "source": [item["image_np"] for item in frames],
             "stream": False,
             "persist": True,
             "verbose": False,
@@ -108,10 +139,43 @@ class UltralyticsProposalDetector:
         }
         if self._cfg.yolo_device:
             kwargs["device"] = self._cfg.yolo_device
+        return kwargs
 
+    @staticmethod
+    def _has_any_track_ids(results: List[Any]) -> bool:
+        for result in results:
+            boxes = getattr(result, "boxes", None)
+            if boxes is None or len(boxes) == 0:
+                continue
+            track_ids = getattr(boxes, "id", None)
+            if track_ids is not None:
+                return True
+        return False
+
+    def _predict_batch(self, frames: List[Dict[str, Any]]) -> List[Any]:
+        kwargs = self._build_track_kwargs()
+        kwargs["source"] = [item["image_np"] for item in frames]
         results = self._model.track(**kwargs)
         if len(results) != len(frames):
             raise RuntimeError(f"YOLO track 返回帧数不匹配: expected={len(frames)} actual={len(results)}")
+        return list(results)
+
+    def _predict_sequential(self, frames: List[Dict[str, Any]]) -> List[Any]:
+        results: List[Any] = []
+        kwargs = self._build_track_kwargs()
+        for frame in frames:
+            frame_results = self._model.track(source=frame["image_np"], **kwargs)
+            if not frame_results:
+                raise RuntimeError("YOLO sequential track 返回空结果。")
+            results.append(frame_results[0])
+        return results
+
+    def detect_sequence(self, frames: List[Dict[str, Any]]) -> Dict[int, List[Proposal]]:
+        if not frames:
+            return {}
+        results = self._predict_batch(frames)
+        if not self._has_any_track_ids(results):
+            results = self._predict_sequential(frames)
 
         proposals_by_frame: Dict[int, List[Proposal]] = {}
         for frame_item, result in zip(frames, results):
@@ -129,7 +193,9 @@ class UltralyticsProposalDetector:
             track_ids = getattr(boxes, "id", None)
             if track_ids is None:
                 raise RuntimeError(
-                    "YOLO tracking 没有返回 track id。请检查 tracker 配置或权重是否支持正常 track。"
+                    "YOLO tracking 没有返回 track id。"
+                    "已先尝试批量 track，再自动回退到逐帧 persist=True，仍未拿到 id；"
+                    "请检查 tracker 配置、权重类型，或当前模型是否真的支持跟踪。"
                 )
 
             xyxy = boxes.xyxy.detach().cpu().numpy()
