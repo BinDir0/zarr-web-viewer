@@ -16,6 +16,16 @@
 
 当前默认 tracker 是 `bytetrack.yaml`。
 
+一个可直接用的示例是：
+
+```yaml
+mediapipe_review:
+  ultralytics_repo_root: /share_data/guantianrui/ultralytics
+  yolo_model_path: /share_data/guantianrui/HaWoR/weights/external/detector.pt
+  yolo_imgsz: 640
+  yolo_device: "0"
+```
+
 ## 2. Discover + Preprocess
 
 ```bash

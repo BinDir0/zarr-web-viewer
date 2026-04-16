@@ -34,8 +34,8 @@ mediapipe_review:
   source_annotations_db: /home/guantianrui/zarr-flaw-viewer/zarr-web-viewer/annotations.db
   source_config_path: /home/guantianrui/rework-viewer/zarr-web-viewer/config.yaml
   prefer_installed_ultralytics: false
-  ultralytics_repo_root: /root/ultralytics
-  yolo_model_path: ""
+  ultralytics_repo_root: /share_data/guantianrui/ultralytics
+  yolo_model_path: /share_data/guantianrui/HaWoR/weights/external/detector.pt
   yolo_tracker_config: bytetrack.yaml
   yolo_device: ""
   yolo_confidence: 0.05

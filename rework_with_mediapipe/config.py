@@ -62,16 +62,27 @@ def _default_mediapipe_repo_root() -> str:
 def _default_ultralytics_repo_root() -> str:
     return _first_existing_path(
         os.environ.get("ULTRALYTICS_REPO_ROOT", ""),
-        "/root/ultralytics",
         "/share_data/guantianrui/ultralytics",
+        "/root/ultralytics",
     )
 
 
 def _default_yolo_model_path() -> str:
     return _first_existing_path(
         os.environ.get("YOLO_MODEL_PATH", ""),
+        "/share_data/guantianrui/HaWoR/weights/external/detector.pt",
+        "/share_data/guantianrui/HaWoR/thirdparty/DROID-SLAM/weights/external/detector.pt",
+        "/share_data/guantianrui/HaWoR-any4d/thirdparty/DROID-SLAM/weights/external/detector.pt",
+        "/share_data/guantianrui/WiLoR/detector.pt",
+        "/share_data/guantianrui/YOLO11n-pose-hands/runs/pose/train/weights/best.pt",
+        "/share_data/guantianrui/YOLO11n-pose-hands/runs/pose/train/weights/last.pt",
         "/share_data/guantianrui/EgoYOLO/detector.pt",
         "/share_data/guantianrui/EgoYOLO/best.pt",
+        "/root/.openclaw/workspace/projects/hawor_original/HaWoR/weights/external/detector.pt",
+        "/root/.openclaw/workspace/projects/hawor_original/HaWoR/thirdparty/DROID-SLAM/weights/external/detector.pt",
+        "/root/.openclaw/workspace/projects/hawor_original/HaWoR-any4d/thirdparty/DROID-SLAM/weights/external/detector.pt",
+        "/root/YOLO11n-pose-hands/runs/pose/train/weights/best.pt",
+        "/root/YOLO11n-pose-hands/runs/pose/train/weights/last.pt",
         "/root/ultralytics/detector.pt",
         "/root/ultralytics/best.pt",
         "/root/ultralytics/weights/detector.pt",
