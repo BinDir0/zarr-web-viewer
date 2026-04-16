@@ -9,10 +9,12 @@ import sys
 from contextlib import contextmanager
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Set, Tuple
 
 import numpy as np
 from PIL import Image
+import yaml
 
 from .config import MediaPipeReviewConfig
 from .frame_sources import make_frame_source
@@ -42,18 +44,20 @@ def _torchvision_metadata_compat():
         importlib.metadata.version = original_version
 
 
-def _import_ultralytics_modules():
+def _import_ultralytics_runtime():
     with _torchvision_metadata_compat():
         from ultralytics import YOLO  # type: ignore
+        from ultralytics.engine.results import Boxes  # type: ignore
+        from ultralytics.trackers.byte_tracker import BYTETracker  # type: ignore
 
-    return YOLO
+    return YOLO, Boxes, BYTETracker
 
 
-def _ensure_ultralytics(cfg: MediaPipeReviewConfig):
+def _ensure_ultralytics_runtime(cfg: MediaPipeReviewConfig):
     first_error: Exception | None = None
     if cfg.prefer_installed_ultralytics:
         try:
-            return _import_ultralytics_modules()
+            return _import_ultralytics_runtime()
         except Exception as exc:  # pragma: no cover - import surface differs by env
             first_error = exc
 
@@ -61,7 +65,7 @@ def _ensure_ultralytics(cfg: MediaPipeReviewConfig):
     if repo_root and repo_root not in sys.path:
         sys.path.insert(0, repo_root)
     try:
-        return _import_ultralytics_modules()
+        return _import_ultralytics_runtime()
     except Exception as exc:  # pragma: no cover - import surface differs by env
         root_cause = exc.__cause__ or exc
         if isinstance(root_cause, importlib.metadata.PackageNotFoundError) and "torchvision" in str(root_cause):
@@ -81,6 +85,38 @@ def _ensure_ultralytics(cfg: MediaPipeReviewConfig):
             "缺少 ultralytics/YOLO Python 依赖，无法运行预计算。"
             f" 当前解释器: {sys.executable}。"
         ) from exc
+
+
+def _resolve_tracker_config_path(cfg: MediaPipeReviewConfig) -> Path:
+    raw = str(cfg.yolo_tracker_config or "").strip()
+    candidates: List[Path] = []
+    if raw:
+        base = Path(raw)
+        candidates.append(base)
+        if not base.suffix:
+            candidates.append(base.with_suffix(".yaml"))
+        candidates.append(cfg.ultralytics_repo_root / "ultralytics" / "cfg" / "trackers" / base.name)
+        if not base.suffix:
+            candidates.append(cfg.ultralytics_repo_root / "ultralytics" / "cfg" / "trackers" / f"{base.name}.yaml")
+    else:
+        candidates.append(cfg.ultralytics_repo_root / "ultralytics" / "cfg" / "trackers" / "bytetrack.yaml")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _load_tracker_args(cfg: MediaPipeReviewConfig) -> SimpleNamespace:
+    tracker_path = _resolve_tracker_config_path(cfg)
+    if not tracker_path.exists():
+        raise FileNotFoundError(f"缺少 ByteTrack 配置文件: {tracker_path}")
+    with tracker_path.open("r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"ByteTrack 配置格式不合法: {tracker_path}")
+    raw.setdefault("tracker_type", "bytetrack")
+    return SimpleNamespace(**raw)
 
 
 def _wrap_angle_diff_deg(prev_angle: float, curr_angle: float) -> float:
@@ -115,67 +151,79 @@ def _save_review_frame(image: Image.Image, output_path: Path) -> None:
 
 class UltralyticsProposalDetector:
     def __init__(self, cfg: MediaPipeReviewConfig):
-        YOLO = _ensure_ultralytics(cfg)
+        YOLO, Boxes, BYTETracker = _ensure_ultralytics_runtime(cfg)
         if not str(cfg.raw.get("yolo_model_path", "") or "").strip():
             raise FileNotFoundError("缺少 yolo_model_path 配置，无法运行 YOLO 预处理。")
         if not cfg.yolo_model_path.exists():
             raise FileNotFoundError(f"缺少 YOLO 权重文件: {cfg.yolo_model_path}")
         self._cfg = cfg
+        self._Boxes = Boxes
+        self._BYTETracker = BYTETracker
         self._model = YOLO(str(cfg.yolo_model_path))
+        self._tracker_args = _load_tracker_args(cfg)
 
     def close(self) -> None:
         return None
 
-    def _build_track_kwargs(self) -> Dict[str, Any]:
+    def _build_predict_kwargs(self) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
             "stream": False,
-            "persist": True,
             "verbose": False,
             "conf": self._cfg.yolo_confidence,
             "iou": self._cfg.yolo_iou,
             "max_det": self._cfg.yolo_max_det,
             "imgsz": self._cfg.yolo_imgsz,
-            "tracker": self._cfg.yolo_tracker_config,
         }
         if self._cfg.yolo_device:
             kwargs["device"] = self._cfg.yolo_device
         return kwargs
 
-    @staticmethod
-    def _has_any_track_ids(results: List[Any]) -> bool:
-        for result in results:
-            boxes = getattr(result, "boxes", None)
-            if boxes is None or len(boxes) == 0:
-                continue
-            track_ids = getattr(boxes, "id", None)
-            if track_ids is not None:
-                return True
-        return False
-
     def _predict_batch(self, frames: List[Dict[str, Any]]) -> List[Any]:
-        kwargs = self._build_track_kwargs()
+        kwargs = self._build_predict_kwargs()
         kwargs["source"] = [item["image_np"] for item in frames]
-        results = self._model.track(**kwargs)
+        results = self._model.predict(**kwargs)
         if len(results) != len(frames):
-            raise RuntimeError(f"YOLO track 返回帧数不匹配: expected={len(frames)} actual={len(results)}")
+            raise RuntimeError(f"YOLO predict 返回帧数不匹配: expected={len(frames)} actual={len(results)}")
         return list(results)
 
-    def _predict_sequential(self, frames: List[Dict[str, Any]]) -> List[Any]:
-        results: List[Any] = []
-        kwargs = self._build_track_kwargs()
-        for frame in frames:
-            frame_results = self._model.track(source=frame["image_np"], **kwargs)
-            if not frame_results:
-                raise RuntimeError("YOLO sequential track 返回空结果。")
-            results.append(frame_results[0])
-        return results
+    def _make_boxes(self, result: Any, orig_shape: Tuple[int, int]):
+        boxes = getattr(result, "boxes", None)
+        if boxes is None or len(boxes) == 0:
+            data = np.zeros((0, 6), dtype=np.float32)
+            return self._Boxes(data, orig_shape)
+        xyxy = boxes.xyxy.detach().cpu().numpy().astype(np.float32, copy=False)
+        conf = (
+            boxes.conf.detach().cpu().numpy().astype(np.float32, copy=False)
+            if boxes.conf is not None
+            else np.zeros((len(boxes),), dtype=np.float32)
+        )
+        cls = (
+            boxes.cls.detach().cpu().numpy().astype(np.float32, copy=False)
+            if boxes.cls is not None
+            else np.zeros((len(boxes),), dtype=np.float32)
+        )
+        data = np.concatenate([xyxy, conf[:, None], cls[:, None]], axis=1)
+        return self._Boxes(data, orig_shape)
+
+    @staticmethod
+    def _rows_from_tracker_state(tracker: Any) -> np.ndarray:
+        current_rows: List[List[float]] = []
+        for track in getattr(tracker, "tracked_stracks", []):
+            if int(getattr(track, "frame_id", -1)) != int(getattr(tracker, "frame_id", -2)):
+                continue
+            result = getattr(track, "result", None)
+            if result is None:
+                continue
+            current_rows.append([float(value) for value in result])
+        if not current_rows:
+            return np.zeros((0, 8), dtype=np.float32)
+        return np.asarray(current_rows, dtype=np.float32)
 
     def detect_sequence(self, frames: List[Dict[str, Any]]) -> Dict[int, List[Proposal]]:
         if not frames:
             return {}
         results = self._predict_batch(frames)
-        if not self._has_any_track_ids(results):
-            results = self._predict_sequential(frames)
+        tracker = self._BYTETracker(args=self._tracker_args, frame_rate=30)
 
         proposals_by_frame: Dict[int, List[Proposal]] = {}
         for frame_item, result in zip(frames, results):
@@ -184,41 +232,29 @@ class UltralyticsProposalDetector:
             orig_width, orig_height = frame_item["orig_size"]
             scale_x = preview_width / max(float(orig_width), 1.0)
             scale_y = preview_height / max(float(orig_height), 1.0)
-
-            boxes = getattr(result, "boxes", None)
-            if boxes is None or len(boxes) == 0:
+            names = getattr(result, "names", {}) or {}
+            det_boxes = self._make_boxes(result, (int(orig_height), int(orig_width)))
+            _ = tracker.update(det_boxes, frame_item["image_np"])
+            track_rows = self._rows_from_tracker_state(tracker)
+            if len(track_rows) == 0:
                 proposals_by_frame[frame_idx] = []
                 continue
 
-            track_ids = getattr(boxes, "id", None)
-            if track_ids is None:
-                raise RuntimeError(
-                    "YOLO tracking 没有返回 track id。"
-                    "已先尝试批量 track，再自动回退到逐帧 persist=True，仍未拿到 id；"
-                    "请检查 tracker 配置、权重类型，或当前模型是否真的支持跟踪。"
-                )
-
-            xyxy = boxes.xyxy.detach().cpu().numpy()
-            conf = boxes.conf.detach().cpu().numpy() if boxes.conf is not None else np.zeros((len(boxes),), dtype=np.float32)
-            cls = boxes.cls.detach().cpu().numpy() if boxes.cls is not None else np.zeros((len(boxes),), dtype=np.float32)
-            ids = track_ids.detach().cpu().numpy()
-            names = getattr(result, "names", {}) or {}
-
             frame_proposals: List[Proposal] = []
-            for det_idx in range(len(boxes)):
-                x1, y1, x2, y2 = [float(value) for value in xyxy[det_idx].tolist()]
-                class_id = int(cls[det_idx]) if det_idx < len(cls) else 0
+            for row_idx, row in enumerate(track_rows):
+                x1, y1, x2, y2, track_id, score, cls_id, det_idx = row.tolist()
+                class_id = int(cls_id)
                 class_name = str(names.get(class_id, class_id))
                 bbox_orig = [x1, y1, x2, y2]
                 bbox_preview = [x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y]
                 frame_proposals.append(
                     Proposal(
                         frame_idx=frame_idx,
-                        det_idx=det_idx,
-                        track_id=int(ids[det_idx]),
+                        det_idx=int(det_idx) if det_idx >= 0 else row_idx,
+                        track_id=int(track_id),
                         bbox_xyxy=bbox_preview,
                         bbox_xyxy_orig=bbox_orig,
-                        score=float(conf[det_idx]) if det_idx < len(conf) else 0.0,
+                        score=float(score),
                         class_id=class_id,
                         class_name=class_name,
                         roi_rotation_2d=0.0,
