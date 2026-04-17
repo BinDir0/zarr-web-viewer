@@ -90,9 +90,6 @@ if (reviewNode) {
   const viewerHint = document.getElementById("mpr-viewer-hint");
   const leftMissingBox = document.getElementById("mpr-left-missing-box");
   const rightMissingBox = document.getElementById("mpr-right-missing-box");
-  const drawLeftButton = document.getElementById("mpr-draw-left");
-  const drawRightButton = document.getElementById("mpr-draw-right");
-  const cancelDrawButton = document.getElementById("mpr-cancel-draw");
   const clearLeftButton = document.getElementById("mpr-clear-left");
   const clearRightButton = document.getElementById("mpr-clear-right");
   const confirmButton = document.getElementById("mpr-confirm-keyframe");
@@ -105,8 +102,6 @@ if (reviewNode) {
   let bundle = null;
   let currentReviewFrameIndex = 0;
   let drawnBoxes = [];
-  let drawingSide = null;
-  let dragState = null;
 
   const frameTracksByFrameIdx = new Map();
   const frameMetaByFrameIdx = new Map();
@@ -132,8 +127,6 @@ if (reviewNode) {
         right_mode: "not_visible",
         left_track_id: null,
         right_track_id: null,
-        left_manual_bbox_xyxy_orig: null,
-        right_manual_bbox_xyxy_orig: null,
       };
       frameReviewByFrame.set(frameIdx, review);
     }
@@ -143,7 +136,6 @@ if (reviewNode) {
   function segmentNeedsRecovery(segmentId) {
     for (const review of frameReviewByFrame.values()) {
       if (frameSegmentId(review.frame_idx) !== Number(segmentId)) continue;
-      if (review.left_mode === "manual_box" || review.right_mode === "manual_box") return true;
       if (review.left_mode === "visible_unrecoverable" || review.right_mode === "visible_unrecoverable") return true;
     }
     return false;
@@ -226,7 +218,6 @@ if (reviewNode) {
     const prefix = side === "left" ? "左手" : "右手";
     const mode = review?.[`${side}_mode`] || "not_visible";
     if (mode === "track") return `${prefix}=T${review[`${side}_track_id`]}`;
-    if (mode === "manual_box") return `${prefix}=手工框`;
     if (mode === "visible_unrecoverable") return `${prefix}=无法恢复`;
     return `${prefix}=不可见`;
   }
@@ -271,8 +262,6 @@ if (reviewNode) {
     review.confirmed = false;
     review[`${side}_mode`] = "not_visible";
     review[`${side}_track_id`] = null;
-    review[`${side}_manual_bbox_xyxy_orig`] = null;
-    if (drawingSide === side) drawingSide = null;
     ensureCurrentReviewFrame(currentFrameIdx);
     renderReviewState();
     drawOverlay();
@@ -286,8 +275,6 @@ if (reviewNode) {
     if (checked) {
       review[`${side}_mode`] = "visible_unrecoverable";
       review[`${side}_track_id`] = null;
-      review[`${side}_manual_bbox_xyxy_orig`] = null;
-      if (drawingSide === side) drawingSide = null;
     } else if (review[`${side}_mode`] === "visible_unrecoverable") {
       review[`${side}_mode`] = "not_visible";
     }
@@ -308,43 +295,12 @@ if (reviewNode) {
       review[`${side}_mode`] = "track";
       review[`${side}_track_id`] = Number(trackId);
     }
-    review[`${side}_manual_bbox_xyxy_orig`] = null;
     const otherSide = side === "left" ? "right" : "left";
     if (review[`${otherSide}_mode`] === "track" && Number(review[`${otherSide}_track_id`]) === Number(trackId)) {
       review[`${otherSide}_mode`] = "not_visible";
       review[`${otherSide}_track_id`] = null;
     }
-    if (drawingSide === side) drawingSide = null;
     ensureCurrentReviewFrame(currentFrameIdx);
-    renderReviewState();
-    drawOverlay();
-  }
-
-  function setManualBox(side, bboxOrig) {
-    const review = getCurrentReview();
-    if (!review) return;
-    const currentFrameIdx = review.frame_idx;
-    review.confirmed = false;
-    review[`${side}_mode`] = "manual_box";
-    review[`${side}_track_id`] = null;
-    review[`${side}_manual_bbox_xyxy_orig`] = bboxOrig.map((item) => Number(item));
-    drawingSide = null;
-    dragState = null;
-    ensureCurrentReviewFrame(currentFrameIdx);
-    renderReviewState();
-    drawOverlay();
-  }
-
-  function toggleDrawMode(side) {
-    drawingSide = drawingSide === side ? null : side;
-    dragState = null;
-    renderReviewState();
-    drawOverlay();
-  }
-
-  function cancelDrawMode() {
-    drawingSide = null;
-    dragState = null;
     renderReviewState();
     drawOverlay();
   }
@@ -371,16 +327,11 @@ if (reviewNode) {
     rightMissingBox.checked = review.right_mode === "visible_unrecoverable";
     confirmButton.textContent = review.confirmed ? "重新确认当前审核帧" : "确认当前审核帧";
     assignmentSummary.textContent = frameRoleSummary(review);
-    viewerHint.textContent = drawingSide
-      ? `当前处于${drawingSide === "left" ? "左手" : "右手"}补框模式：按住左键拖出框，松开完成。`
-      : "左键点 proposal=左手，右键点 proposal=右手；也可以切到补框模式拖出手工框。";
+    viewerHint.textContent = "左键点 proposal=左手，右键点 proposal=右手；←/→ 切换审核帧。";
     stripSummary.textContent = `${reviewFrames.filter((item) => ensureReviewEntry(item)?.confirmed).length}/${reviewFrames.length} 已确认`;
     submitButton.disabled = !allConfirmed();
     prevKeyframeButton.disabled = currentReviewFrameIndex <= 0;
     nextKeyframeButton.disabled = currentReviewFrameIndex >= reviewFrames.length - 1;
-    drawLeftButton.className = `mpr-btn ${drawingSide === "left" ? "mpr-btn-primary" : "mpr-btn-secondary"}`;
-    drawRightButton.className = `mpr-btn ${drawingSide === "right" ? "mpr-btn-primary" : "mpr-btn-secondary"}`;
-    cancelDrawButton.disabled = !drawingSide;
     renderReviewFrameList();
   }
 
@@ -408,25 +359,10 @@ if (reviewNode) {
       };
       keyframeList.appendChild(button);
     });
-  }
-
-  function drawManualBox(ctx, bboxOrig, sx, sy, color, label) {
-    const [x1, y1, x2, y2] = bboxOrig;
-    const left = x1 * sx;
-    const top = y1 * sy;
-    const width = (x2 - x1) * sx;
-    const height = (y2 - y1) * sy;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 5;
-    ctx.strokeRect(left, top, width, height);
-    ctx.font = "bold 15px sans-serif";
-    const textWidth = ctx.measureText(label).width;
-    const labelX = left;
-    const labelY = Math.max(24, top);
-    ctx.fillStyle = color;
-    ctx.fillRect(labelX, labelY - 20, textWidth + 16, 24);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillText(label, labelX + 8, labelY - 4);
+    const currentChip = keyframeList.querySelector(".mpr-keyframe-chip.is-current");
+    if (currentChip) {
+      currentChip.scrollIntoView({ block: "nearest", inline: "center" });
+    }
   }
 
   function drawOverlay() {
@@ -472,24 +408,6 @@ if (reviewNode) {
         area: width * height,
       });
     });
-    if (review.left_mode === "manual_box" && Array.isArray(review.left_manual_bbox_xyxy_orig)) {
-      drawManualBox(ctx, review.left_manual_bbox_xyxy_orig, sx, sy, "#0f766e", "L · 手工");
-    }
-    if (review.right_mode === "manual_box" && Array.isArray(review.right_manual_bbox_xyxy_orig)) {
-      drawManualBox(ctx, review.right_manual_bbox_xyxy_orig, sx, sy, "#b91c1c", "R · 手工");
-    }
-    if (dragState && drawingSide) {
-      const left = Math.min(dragState.startX, dragState.currentX);
-      const top = Math.min(dragState.startY, dragState.currentY);
-      const width = Math.abs(dragState.currentX - dragState.startX);
-      const height = Math.abs(dragState.currentY - dragState.startY);
-      ctx.save();
-      ctx.setLineDash([10, 6]);
-      ctx.strokeStyle = drawingSide === "left" ? "#0f766e" : "#b91c1c";
-      ctx.lineWidth = 4;
-      ctx.strokeRect(left, top, width, height);
-      ctx.restore();
-    }
   }
 
   function buildPayload() {
@@ -504,12 +422,8 @@ if (reviewNode) {
           right_mode: review.right_mode,
           left_track_id: review.left_track_id == null ? null : Number(review.left_track_id),
           right_track_id: review.right_track_id == null ? null : Number(review.right_track_id),
-          left_manual_bbox_xyxy_orig: Array.isArray(review.left_manual_bbox_xyxy_orig)
-            ? review.left_manual_bbox_xyxy_orig.map((item) => Number(item))
-            : null,
-          right_manual_bbox_xyxy_orig: Array.isArray(review.right_manual_bbox_xyxy_orig)
-            ? review.right_manual_bbox_xyxy_orig.map((item) => Number(item))
-            : null,
+          left_manual_bbox_xyxy_orig: null,
+          right_manual_bbox_xyxy_orig: null,
         };
       }),
     };
@@ -546,16 +460,10 @@ if (reviewNode) {
         frameReviewByFrame.set(frameIdx, {
           frame_idx: frameIdx,
           confirmed: Boolean(item.confirmed),
-          left_mode: item.left_mode || "not_visible",
-          right_mode: item.right_mode || "not_visible",
+          left_mode: item.left_mode === "manual_box" ? "visible_unrecoverable" : (item.left_mode || "not_visible"),
+          right_mode: item.right_mode === "manual_box" ? "visible_unrecoverable" : (item.right_mode || "not_visible"),
           left_track_id: item.left_track_id == null ? null : Number(item.left_track_id),
           right_track_id: item.right_track_id == null ? null : Number(item.right_track_id),
-          left_manual_bbox_xyxy_orig: Array.isArray(item.left_manual_bbox_xyxy_orig)
-            ? item.left_manual_bbox_xyxy_orig.map((value) => Number(value))
-            : null,
-          right_manual_bbox_xyxy_orig: Array.isArray(item.right_manual_bbox_xyxy_orig)
-            ? item.right_manual_bbox_xyxy_orig.map((value) => Number(value))
-            : null,
         });
       });
       return;
@@ -570,8 +478,6 @@ if (reviewNode) {
         right_mode: item.right_track_id != null ? "track" : item.right_missing_box ? "visible_unrecoverable" : "not_visible",
         left_track_id: item.left_track_id == null ? null : Number(item.left_track_id),
         right_track_id: item.right_track_id == null ? null : Number(item.right_track_id),
-        left_manual_bbox_xyxy_orig: null,
-        right_manual_bbox_xyxy_orig: null,
       });
     });
   }
@@ -585,17 +491,6 @@ if (reviewNode) {
     const rect = overlayCanvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
-    if (drawingSide) {
-      if (event.button !== 0) return;
-      dragState = {
-        startX: x,
-        startY: y,
-        currentX: x,
-        currentY: y,
-      };
-      drawOverlay();
-      return;
-    }
     if (event.button !== 0 && event.button !== 2) return;
     const candidates = drawnBoxes
       .filter((item) => x >= item.left && x <= item.right && y >= item.top && y <= item.bottom)
@@ -604,41 +499,8 @@ if (reviewNode) {
     assignTrack(event.button === 0 ? "left" : "right", candidates[0].track_id);
   });
 
-  overlayCanvas.addEventListener("mousemove", (event) => {
-    if (!dragState) return;
-    const rect = overlayCanvas.getBoundingClientRect();
-    dragState.currentX = event.clientX - rect.left;
-    dragState.currentY = event.clientY - rect.top;
-    drawOverlay();
-  });
-
-  window.addEventListener("mouseup", (event) => {
-    if (!dragState || !drawingSide) return;
-    if (event.button !== 0) return;
-    const left = Math.min(dragState.startX, dragState.currentX);
-    const top = Math.min(dragState.startY, dragState.currentY);
-    const width = Math.abs(dragState.currentX - dragState.startX);
-    const height = Math.abs(dragState.currentY - dragState.startY);
-    if (width < 4 || height < 4) {
-      dragState = null;
-      drawOverlay();
-      return;
-    }
-    const scaleX = (frameImage.naturalWidth || 1) / Math.max(overlayCanvas.width, 1);
-    const scaleY = (frameImage.naturalHeight || 1) / Math.max(overlayCanvas.height, 1);
-    setManualBox(drawingSide, [
-      left * scaleX,
-      top * scaleY,
-      (left + width) * scaleX,
-      (top + height) * scaleY,
-    ]);
-  });
-
   leftMissingBox.onchange = () => setUnrecoverable("left", leftMissingBox.checked);
   rightMissingBox.onchange = () => setUnrecoverable("right", rightMissingBox.checked);
-  drawLeftButton.onclick = () => toggleDrawMode("left");
-  drawRightButton.onclick = () => toggleDrawMode("right");
-  cancelDrawButton.onclick = cancelDrawMode;
   clearLeftButton.onclick = () => setSideNotVisible("left");
   clearRightButton.onclick = () => setSideNotVisible("right");
   confirmButton.onclick = confirmCurrentReviewFrame;
@@ -649,6 +511,20 @@ if (reviewNode) {
     selectReviewFrame(currentReviewFrameIndex + 1);
   };
   submitButton.onclick = submitReview;
+
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    const tagName = typeof target?.tagName === "string" ? target.tagName.toLowerCase() : "";
+    const isEditable = Boolean(target?.isContentEditable) || tagName === "input" || tagName === "textarea" || tagName === "select";
+    if (isEditable) return;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      selectReviewFrame(currentReviewFrameIndex - 1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      selectReviewFrame(currentReviewFrameIndex + 1);
+    }
+  });
 
   async function boot() {
     const response = await fetch(`/api/mediapipe/clips/${clipId}`);
