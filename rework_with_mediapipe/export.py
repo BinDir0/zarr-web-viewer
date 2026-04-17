@@ -23,28 +23,46 @@ def export_clip_manifest(cfg: MediaPipeReviewConfig) -> Dict:
     with manifest_path.open("w", encoding="utf-8") as f:
         for row in rows:
             bundle_relpath = str(row["bundle_relpath"] or "")
-            item = {
-                "clip_id": int(row["id"]),
-                "episode_id": str(row["episode_id"]),
-                "episode_name": str(row["episode_name"] or row["episode_id"]),
-                "dataset_name": str(row["dataset_name"] or ""),
-                "clip_start": int(row["clip_start"]),
-                "clip_end": int(row["clip_end"]),
-                "status": str(row["status"]),
-                "dirty_reason": str(row["dirty_reason"]),
-                "bundle_json": str(cfg.artifact_abspath(bundle_relpath) / "bundle.json"),
-                "proposals_npz": str(cfg.artifact_abspath(bundle_relpath) / "proposals.npz"),
-                "fit_json": str(cfg.artifact_abspath(bundle_relpath) / "fit.json"),
-                "fit_npz": str(cfg.artifact_abspath(bundle_relpath) / "fit.npz"),
-            }
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
-            items.append(item)
+            fit_payload = json.loads(str(row["fit_payload_json"] or "{}"))
+            subepisodes = list(fit_payload.get("subepisodes", []))
+            if not subepisodes:
+                subepisodes = [
+                    {
+                        "subepisode_index": 0,
+                        "start_frame": int(row["clip_start"]),
+                        "end_frame": int(row["clip_end"]),
+                        "num_frames": int(row["num_frames"]),
+                    }
+                ]
+            for subepisode in subepisodes:
+                item = {
+                    "clip_id": int(row["id"]),
+                    "parent_clip_id": int(row["id"]),
+                    "subepisode_index": int(subepisode.get("subepisode_index", 0)),
+                    "episode_id": str(row["episode_id"]),
+                    "episode_name": str(row["episode_name"] or row["episode_id"]),
+                    "dataset_name": str(row["dataset_name"] or ""),
+                    "clip_start": int(row["clip_start"]),
+                    "clip_end": int(row["clip_end"]),
+                    "frame_start": int(subepisode.get("start_frame", row["clip_start"])),
+                    "frame_end": int(subepisode.get("end_frame", row["clip_end"])),
+                    "num_frames": int(subepisode.get("num_frames", row["num_frames"])),
+                    "status": str(row["status"]),
+                    "dirty_reason": str(row["dirty_reason"]),
+                    "bundle_json": str(cfg.artifact_abspath(bundle_relpath) / "bundle.json"),
+                    "proposals_npz": str(cfg.artifact_abspath(bundle_relpath) / "proposals.npz"),
+                    "fit_json": str(cfg.artifact_abspath(bundle_relpath) / "fit.json"),
+                    "fit_npz": str(cfg.artifact_abspath(bundle_relpath) / "fit.npz"),
+                }
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                items.append(item)
 
     summary = {
         "status": "ok",
         "manifest_path": str(manifest_path),
         "summary_path": str(summary_path),
-        "num_clips": len(items),
+        "num_clips": len(rows),
+        "num_items": len(items),
         "items": items[:10],
     }
     with summary_path.open("w", encoding="utf-8") as f:
@@ -55,7 +73,8 @@ def export_clip_manifest(cfg: MediaPipeReviewConfig) -> Dict:
             "manifest_path": str(manifest_path),
             "summary_path": str(summary_path),
             "exported_at": datetime.utcnow().isoformat(),
-            "num_clips": len(items),
+            "num_clips": len(rows),
+            "num_items": len(items),
         }
         conn.executemany(
             """

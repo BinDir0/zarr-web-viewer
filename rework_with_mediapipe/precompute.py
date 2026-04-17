@@ -464,6 +464,10 @@ def _build_segments_and_keyframes(
         for frame_idx in segment_frames:
             frame_to_segment[int(frame_idx)] = segment_id
         visible = sorted(visible_track_ids.get(start_frame, set()))
+        recovery_candidate_frames = []
+        stride = max(1, int(cfg.recovery_anchor_stride_frames))
+        for pos in range(stride, max(len(segment_frames) - 1, 0), stride):
+            recovery_candidate_frames.append(int(segment_frames[pos]))
         segment = {
             "segment_id": segment_id,
             "start_frame": start_frame,
@@ -471,6 +475,8 @@ def _build_segments_and_keyframes(
             "anchor_frame_idx": start_frame,
             "visible_track_ids": visible,
             "boundary_reasons": sorted(boundary_reasons.get(start_frame, set())),
+            "recovery_stride_frames": stride,
+            "recovery_candidate_frames": recovery_candidate_frames,
         }
         segments.append(segment)
         keyframes.append(
@@ -537,6 +543,22 @@ def _build_segments_and_keyframes(
         deduped_keyframes.values(),
         key=lambda item: (int(item["frame_idx"]), 0 if item["kind"] == "anchor" else 1),
     )
+    keyframes_by_segment: Dict[int, Set[int]] = defaultdict(set)
+    for item in ordered_keyframes:
+        keyframes_by_segment[int(item["segment_id"])].add(int(item["frame_idx"]))
+    for segment in segments:
+        segment_id = int(segment["segment_id"])
+        keyframe_frames = set(keyframes_by_segment.get(segment_id, set()))
+        recovery_frames = [
+            int(frame_idx)
+            for frame_idx in segment.get("recovery_candidate_frames", [])
+            if int(frame_idx) not in keyframe_frames
+        ]
+        end_frame = int(segment["end_frame"])
+        if end_frame not in keyframe_frames and end_frame not in recovery_frames:
+            recovery_frames.append(end_frame)
+        segment["keyframe_frame_indices"] = sorted(keyframe_frames)
+        segment["recovery_candidate_frames"] = sorted(set(int(frame_idx) for frame_idx in recovery_frames))
     return segments, ordered_keyframes, frame_to_segment
 
 
@@ -578,6 +600,7 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
     frames_dir = bundle_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     frames_relpaths: Dict[int, str] = {}
+    frame_sizes: Dict[int, Dict[str, List[int]]] = {}
     detector_inputs: List[Dict[str, Any]] = []
 
     for packet in frame_source.iter_frames(clip.clip_start, clip.clip_end):
@@ -585,6 +608,10 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
         relpath = f"bundles/clip_{clip_id:06d}/frames/{packet.frame_idx:06d}.jpg"
         _save_review_frame(review_image, frames_dir / f"{packet.frame_idx:06d}.jpg")
         frames_relpaths[packet.frame_idx] = relpath
+        frame_sizes[int(packet.frame_idx)] = {
+            "orig_size": [int(packet.image.size[0]), int(packet.image.size[1])],
+            "preview_size": [int(review_image.size[0]), int(review_image.size[1])],
+        }
         detector_inputs.append(
             {
                 "frame_idx": int(packet.frame_idx),
@@ -649,6 +676,7 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
                 "is_bad": frame_idx in bad_frame_lookup,
                 "segment_id": int(frame_to_segment.get(frame_idx, -1)),
                 "visible_track_ids": sorted(visible_track_ids.get(frame_idx, set())),
+                **frame_sizes.get(frame_idx, {}),
             }
             for frame_idx in ordered_frame_indices
         ],

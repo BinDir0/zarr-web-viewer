@@ -251,6 +251,20 @@ def list_clips_by_status(conn: sqlite3.Connection, status: str, limit: int = 100
     ).fetchall()
 
 
+def get_clip_by_status_offset(conn: sqlite3.Connection, status: str, offset: int = 0) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM clips WHERE status = ? ORDER BY id LIMIT 1 OFFSET ?",
+        (status, max(0, int(offset))),
+    ).fetchone()
+
+
+def get_next_clip_by_status_after_id(conn: sqlite3.Connection, status: str, after_clip_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM clips WHERE status = ? AND id > ? ORDER BY id LIMIT 1",
+        (status, int(after_clip_id)),
+    ).fetchone()
+
+
 def list_clips_by_statuses(conn: sqlite3.Connection, statuses: Sequence[str], limit: int = 100) -> List[sqlite3.Row]:
     if not statuses:
         return []
@@ -301,7 +315,29 @@ def save_vendor_review(
     review_payload: Dict[str, Any],
 ) -> None:
     review_version = str(review_payload.get("review_version") or "")
-    if review_version == "keyframe_v1":
+    if review_version == "frame_review_v2":
+        frame_reviews = list(review_payload.get("frame_reviews", []))
+        left_track_ids = sorted(
+            {
+                int(item["left_track_id"])
+                for item in frame_reviews
+                if item.get("left_mode") == "track" and item.get("left_track_id") is not None
+            }
+        )
+        right_track_ids = sorted(
+            {
+                int(item["right_track_id"])
+                for item in frame_reviews
+                if item.get("right_mode") == "track" and item.get("right_track_id") is not None
+            }
+        )
+        payload = {
+            "review_version": "frame_review_v2",
+            "frame_reviews": frame_reviews,
+        }
+        review_confidence = "frame_recovery_v2"
+        should_exclude = False
+    elif review_version == "keyframe_v1":
         keyframe_reviews = list(review_payload.get("keyframe_reviews", []))
         left_track_ids = sorted(
             {
@@ -420,6 +456,8 @@ def save_fit_result(conn: sqlite3.Connection, clip_id: int, status: str, fit_jso
     )
     if status.startswith("fit_ok"):
         clip_status = "fit_ok"
+    elif status == "fit_dropped":
+        clip_status = "fit_dropped"
     elif status.startswith("qa_needed"):
         clip_status = status
     else:

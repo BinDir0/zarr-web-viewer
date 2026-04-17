@@ -7,9 +7,9 @@
     <link rel="stylesheet" href="{{ url_for('mediapipe_review.static', filename='mediapipe_review.css') }}">
   </head>
   <body class="mpr-page">
-    <div id="mpr-review-app" data-clip-id="{{ clip_id }}">
+    <div id="mpr-review-app" data-clip-id="{{ clip_id }}" data-start-rank="{{ start_rank }}">
       <header class="mpr-header">
-        <a class="mpr-link" href="{{ url_for('mediapipe_review.dashboard') }}">返回 Dashboard</a>
+        <a class="mpr-link" href="{{ url_for('mediapipe_review.dashboard', start_rank=start_rank) }}">返回 Dashboard</a>
         <div class="mpr-header-copy">
           <div id="mpr-title">Loading clip {{ clip_id }}...</div>
           <div id="mpr-subtitle" class="mpr-meta-note"></div>
@@ -36,17 +36,22 @@
 
           <section class="mpr-review-controls">
             <div id="mpr-viewer-hint" class="mpr-meta-note">
-              左键点框=wearer 左手；右键点框=wearer 右手；再次点同侧可清空。页面只显示关键帧。
+              左键点框=wearer 左手；右键点框=wearer 右手；也可以切到补框模式拖出手工框。页面会在需要时展开恢复锚点。
             </div>
             <div class="mpr-inline">
               <label class="mpr-checkbox-row">
                 <input id="mpr-left-missing-box" type="checkbox">
-                <span>左手可见但没框</span>
+                <span>左手可见但当前段无法恢复</span>
               </label>
               <label class="mpr-checkbox-row">
                 <input id="mpr-right-missing-box" type="checkbox">
-                <span>右手可见但没框</span>
+                <span>右手可见但当前段无法恢复</span>
               </label>
+            </div>
+            <div class="mpr-inline">
+              <button id="mpr-draw-left" class="mpr-btn mpr-btn-secondary" type="button">给左手补框</button>
+              <button id="mpr-draw-right" class="mpr-btn mpr-btn-secondary" type="button">给右手补框</button>
+              <button id="mpr-cancel-draw" class="mpr-btn mpr-btn-secondary" type="button">取消画框</button>
             </div>
             <div class="mpr-inline">
               <button id="mpr-clear-left" class="mpr-btn mpr-btn-secondary" type="button">清空左手</button>
@@ -64,7 +69,7 @@
 
         <section class="mpr-card">
           <div class="mpr-strip-head">
-            <h2>关键帧</h2>
+            <h2>审核帧</h2>
             <div id="mpr-strip-summary" class="mpr-meta-note"></div>
           </div>
           <div id="mpr-keyframe-list" class="mpr-keyframe-list"></div>

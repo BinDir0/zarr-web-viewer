@@ -249,6 +249,14 @@ class MediaPipeReviewConfig:
         return int(self.raw["keyframe_extra_random_min_frames"])
 
     @property
+    def recovery_anchor_stride_frames(self) -> int:
+        return int(self.raw["recovery_anchor_stride_frames"])
+
+    @property
+    def min_export_episode_frames(self) -> int:
+        return int(self.raw["min_export_episode_frames"])
+
+    @property
     def detector_max_hands(self) -> int:
         return int(self.raw["detector_max_hands"])
 
@@ -393,6 +401,8 @@ def load_config(config_path: str | None = None) -> MediaPipeReviewConfig:
         "keyframe_motion_area_ratio_low": 0.55,
         "keyframe_motion_rotation_deg": 50.0,
         "keyframe_extra_random_min_frames": 72,
+        "recovery_anchor_stride_frames": 10,
+        "min_export_episode_frames": 30,
         "detector_max_hands": 6,
         "min_detection_confidence": 0.10,
         "min_presence_confidence": 0.10,

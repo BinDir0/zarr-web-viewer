@@ -15,11 +15,17 @@
           <p>这个页面只给审核员使用。审核员只需要把候选 Track 归到 wearer-left / wearer-right，或者标记该侧可见但缺框。</p>
         </div>
         <div class="mpr-actions" id="mpr-start-actions">
-          {% if summary.next_clip_id %}
-          <a id="mpr-start-link" class="mpr-btn mpr-btn-primary" href="{{ url_for('mediapipe_review.clip_page', clip_id=summary.next_clip_id) }}">开始审核 Clip {{ summary.next_clip_id }}</a>
-          {% else %}
-          <span id="mpr-start-empty" class="mpr-empty">当前没有 ready_for_review 的 clip</span>
-          {% endif %}
+          <label class="mpr-rank-picker">
+            <span class="mpr-meta-note">从第几条开始</span>
+            <input id="mpr-start-rank" class="mpr-rank-input" type="number" min="1" step="1" value="{{ start_rank }}">
+          </label>
+          <a
+            id="mpr-start-link"
+            class="mpr-btn mpr-btn-primary"
+            href="{{ url_for('mediapipe_review.clip_page', clip_id=summary.next_clip_id or 0, start_rank=start_rank) }}"
+            {% if not summary.next_clip_id %}style="display:none"{% endif %}
+          >开始审核第 {{ start_rank }} 条 Clip {{ summary.next_clip_id or "" }}</a>
+          <span id="mpr-start-empty" class="mpr-empty" {% if summary.next_clip_id %}style="display:none"{% endif %}>从第 {{ start_rank }} 条开始时，当前没有 ready_for_review 的 clip</span>
         </div>
       </section>
 
@@ -40,10 +46,10 @@
       <section class="mpr-card">
         <h2>审核说明</h2>
         <div class="mpr-instructions">
-          <div>1. 点“开始审核”进入一条 clip。</div>
+          <div>1. 先在右上角填“从第几条开始”，再点“开始审核”。这里的顺序按 ready_for_review 队列中的 clip 顺序计算。</div>
           <div>2. 一个 side 可以归并多个 Track；不属于 wearer 的手直接忽略。</div>
           <div>3. 如果画面里能看到手，但没有任何候选框，请勾该侧 <code>可见但缺框</code>。</div>
-          <div>4. 提交后会自动跳到下一条 ready clip。</div>
+          <div>4. 提交后会继续跳到当前 clip 后面的下一条 ready clip，不会再跳回队首。</div>
         </div>
       </section>
 
