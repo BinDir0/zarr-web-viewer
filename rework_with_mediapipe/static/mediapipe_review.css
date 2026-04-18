@@ -228,16 +228,35 @@ body.mpr-page {
 .mpr-viewer-shell {
   position: relative;
   width: 100%;
-  min-height: 420px;
+  height: clamp(360px, 72vh, 860px);
   background: #181614;
   border-radius: 18px;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  box-sizing: border-box;
+}
+
+.mpr-viewer-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  max-height: 100%;
 }
 
 #mpr-frame-image,
 #mpr-overlay-canvas {
-  width: 100%;
   display: block;
+}
+
+#mpr-frame-image {
+  max-width: 100%;
+  max-height: calc(clamp(360px, 72vh, 860px) - 24px);
+  width: auto;
+  height: auto;
+  object-fit: contain;
 }
 
 #mpr-overlay-canvas {
@@ -251,11 +270,29 @@ body.mpr-page {
   gap: 10px;
 }
 
-.mpr-checkbox-row {
-  display: inline-flex;
-  gap: 8px;
-  align-items: center;
+.mpr-side-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mpr-side-action-card {
+  border-radius: 14px;
+  border: 1px solid rgba(84, 61, 30, 0.12);
+  background: #fff8ed;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.mpr-side-action-title {
+  font-weight: 700;
   color: #4b3d2b;
+}
+
+.mpr-btn.is-active {
+  background: #8d5b2a;
+  color: #fffdf8;
 }
 
 .mpr-selection-summary {
@@ -427,5 +464,9 @@ body.mpr-page {
 
   .mpr-header-copy {
     text-align: left;
+  }
+
+  .mpr-side-action-grid {
+    grid-template-columns: 1fr;
   }
 }

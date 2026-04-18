@@ -30,27 +30,31 @@
           </div>
 
           <div class="mpr-viewer-shell">
-            <img id="mpr-frame-image" alt="frame">
-            <canvas id="mpr-overlay-canvas"></canvas>
+            <div id="mpr-viewer-stage" class="mpr-viewer-stage">
+              <img id="mpr-frame-image" alt="frame">
+              <canvas id="mpr-overlay-canvas"></canvas>
+            </div>
           </div>
 
           <section class="mpr-review-controls">
             <div id="mpr-viewer-hint" class="mpr-meta-note">
               左键点框=wearer 左手；右键点框=wearer 右手；`←/→` 切换审核帧。页面会在需要时展开恢复锚点。
             </div>
-            <div class="mpr-inline">
-              <label class="mpr-checkbox-row">
-                <input id="mpr-left-missing-box" type="checkbox">
-                <span>左手可见但当前段无法恢复</span>
-              </label>
-              <label class="mpr-checkbox-row">
-                <input id="mpr-right-missing-box" type="checkbox">
-                <span>右手可见但当前段无法恢复</span>
-              </label>
-            </div>
-            <div class="mpr-inline">
-              <button id="mpr-clear-left" class="mpr-btn mpr-btn-secondary" type="button">清空左手</button>
-              <button id="mpr-clear-right" class="mpr-btn mpr-btn-secondary" type="button">清空右手</button>
+            <div class="mpr-side-action-grid">
+              <section class="mpr-side-action-card">
+                <div class="mpr-side-action-title">左手</div>
+                <div class="mpr-inline">
+                  <button id="mpr-left-not-visible" class="mpr-btn mpr-btn-secondary" type="button">不可见</button>
+                  <button id="mpr-left-missing-box" class="mpr-btn mpr-btn-secondary" type="button">可见但缺框</button>
+                </div>
+              </section>
+              <section class="mpr-side-action-card">
+                <div class="mpr-side-action-title">右手</div>
+                <div class="mpr-inline">
+                  <button id="mpr-right-not-visible" class="mpr-btn mpr-btn-secondary" type="button">不可见</button>
+                  <button id="mpr-right-missing-box" class="mpr-btn mpr-btn-secondary" type="button">可见但缺框</button>
+                </div>
+              </section>
             </div>
             <div id="mpr-assignment-summary" class="mpr-selection-summary"></div>
           </section>
