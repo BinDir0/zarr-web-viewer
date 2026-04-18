@@ -10,7 +10,7 @@ from .config import MediaPipeReviewConfig, load_config
 from .db import (
     count_clips_by_status,
     get_clip,
-    get_clip_by_status_offset,
+    get_preprocessed_clip_by_offset,
     get_next_clip_by_status_after_id,
     list_clips_by_statuses,
     list_fit_jobs,
@@ -68,13 +68,14 @@ def _summary_payload(cfg: MediaPipeReviewConfig, *, start_rank: int = 1) -> Dict
     queue_offset = max(0, int(start_rank) - 1)
     with open_db(cfg.db_path) as conn:
         counts = count_clips_by_status(conn)
-        next_ready = get_clip_by_status_offset(conn, "ready_for_review", offset=queue_offset)
+        start_clip = get_preprocessed_clip_by_offset(conn, offset=queue_offset)
         reviewed = list_clips_by_statuses(conn, ["reviewed_ready_for_fit", "fit_ok", "exported"], limit=5)
         queued_fit = list_fit_jobs(conn, status="queued_fit", limit=5)
     return {
         "counts": counts,
         "requested_start_rank": int(start_rank),
-        "next_clip_id": int(next_ready["id"]) if next_ready else None,
+        "next_clip_id": int(start_clip["id"]) if start_clip else None,
+        "next_clip_status": str(start_clip["status"]) if start_clip else None,
         "recent_reviewed_count": len(reviewed),
         "queued_fit_count": len(queued_fit),
         "paths": {
@@ -373,7 +374,7 @@ def api_next_clip():
         if after_clip_id is not None:
             row = get_next_clip_by_status_after_id(conn, "ready_for_review", after_clip_id=after_clip_id)
         else:
-            row = get_clip_by_status_offset(conn, "ready_for_review", offset=queue_offset)
+            row = get_preprocessed_clip_by_offset(conn, offset=queue_offset)
     return jsonify(
         {
             "success": True,
@@ -405,7 +406,7 @@ def api_submit_review(clip_id: int):
         if clip is None:
             abort(404)
         if not clip.get("bundle_relpath"):
-            return jsonify({"success": False, "message": "clip bundle is missing"}), 400
+            return jsonify({"success": False, "message": "episode bundle is missing"}), 400
         bundle = _load_bundle(cfg, clip["bundle_relpath"])
         try:
             review_version = str(payload.get("review_version") or "")

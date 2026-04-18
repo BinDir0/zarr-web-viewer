@@ -127,6 +127,15 @@ def _loads(payload: Optional[str], default: Any = None) -> Any:
     return json.loads(payload)
 
 
+def _is_episode_unit(clip_start: int, clip_end: int, num_frames: int) -> bool:
+    return int(num_frames) > 0 and int(clip_start) == 0 and int(clip_end) == int(num_frames)
+
+
+def _episode_unit_predicate(table_alias: Optional[str] = None) -> str:
+    prefix = f"{table_alias}." if table_alias else ""
+    return f"{prefix}clip_start = 0 AND {prefix}clip_end = {prefix}num_frames"
+
+
 def upsert_clip(
     conn: sqlite3.Connection,
     *,
@@ -141,6 +150,47 @@ def upsert_clip(
     dirty_reason: str,
     status: str,
 ) -> int:
+    if _is_episode_unit(clip_start, clip_end, num_frames):
+        existing = conn.execute(
+            """
+            SELECT id FROM clips
+            WHERE episode_id = ? AND clip_start = ? AND clip_end = ? AND num_frames = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (episode_id, clip_start, clip_end, num_frames),
+        ).fetchone()
+        if existing is not None:
+            conn.execute(
+                """
+                UPDATE clips
+                SET episode_name = ?,
+                    dataset_name = ?,
+                    source_type = ?,
+                    source_json = ?,
+                    num_frames = ?,
+                    dirty_reason = ?,
+                    status = CASE
+                        WHEN clips.status IN ('queued_preprocess', 'preprocessing', 'failed')
+                            THEN ?
+                        ELSE clips.status
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    episode_name,
+                    dataset_name,
+                    source_type,
+                    _dumps(source_json),
+                    num_frames,
+                    dirty_reason,
+                    status,
+                    int(existing["id"]),
+                ),
+            )
+            conn.commit()
+            return int(existing["id"])
     conn.execute(
         """
         INSERT INTO clips (
@@ -250,21 +300,35 @@ def replace_candidate_chains(conn: sqlite3.Connection, clip_id: int, chains: Ite
 
 def list_clips_by_status(conn: sqlite3.Connection, status: str, limit: int = 100) -> List[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM clips WHERE status = ? ORDER BY id LIMIT ?",
+        f"SELECT * FROM clips WHERE status = ? AND {_episode_unit_predicate()} ORDER BY id LIMIT ?",
         (status, limit),
     ).fetchall()
 
 
 def get_clip_by_status_offset(conn: sqlite3.Connection, status: str, offset: int = 0) -> Optional[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM clips WHERE status = ? ORDER BY id LIMIT 1 OFFSET ?",
+        f"SELECT * FROM clips WHERE status = ? AND {_episode_unit_predicate()} ORDER BY id LIMIT 1 OFFSET ?",
         (status, max(0, int(offset))),
+    ).fetchone()
+
+
+def get_preprocessed_clip_by_offset(conn: sqlite3.Connection, offset: int = 0) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT * FROM clips
+        WHERE bundle_relpath IS NOT NULL
+          AND clip_start = 0
+          AND clip_end = num_frames
+        ORDER BY id
+        LIMIT 1 OFFSET ?
+        """,
+        (max(0, int(offset)),),
     ).fetchone()
 
 
 def get_next_clip_by_status_after_id(conn: sqlite3.Connection, status: str, after_clip_id: int) -> Optional[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM clips WHERE status = ? AND id > ? ORDER BY id LIMIT 1",
+        f"SELECT * FROM clips WHERE status = ? AND id > ? AND {_episode_unit_predicate()} ORDER BY id LIMIT 1",
         (status, int(after_clip_id)),
     ).fetchone()
 
@@ -274,13 +338,15 @@ def list_clips_by_statuses(conn: sqlite3.Connection, statuses: Sequence[str], li
         return []
     placeholders = ",".join(["?"] * len(statuses))
     return conn.execute(
-        f"SELECT * FROM clips WHERE status IN ({placeholders}) ORDER BY id LIMIT ?",
+        f"SELECT * FROM clips WHERE status IN ({placeholders}) AND {_episode_unit_predicate()} ORDER BY id LIMIT ?",
         list(statuses) + [limit],
     ).fetchall()
 
 
 def count_clips_by_status(conn: sqlite3.Connection) -> Dict[str, int]:
-    rows = conn.execute("SELECT status, COUNT(*) AS n FROM clips GROUP BY status").fetchall()
+    rows = conn.execute(
+        f"SELECT status, COUNT(*) AS n FROM clips WHERE {_episode_unit_predicate()} GROUP BY status"
+    ).fetchall()
     return {str(row["status"]): int(row["n"]) for row in rows}
 
 
@@ -441,7 +507,15 @@ def save_vendor_review(
 
 def list_fit_jobs(conn: sqlite3.Connection, status: str = "queued_fit", limit: int = 20) -> List[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM fit_jobs WHERE status = ? ORDER BY updated_at DESC, clip_id DESC LIMIT ?",
+        f"""
+        SELECT fit_jobs.*
+        FROM fit_jobs
+        INNER JOIN clips ON clips.id = fit_jobs.clip_id
+        WHERE fit_jobs.status = ?
+          AND {_episode_unit_predicate('clips')}
+        ORDER BY fit_jobs.updated_at DESC, fit_jobs.clip_id DESC
+        LIMIT ?
+        """,
         (status, limit),
     ).fetchall()
 

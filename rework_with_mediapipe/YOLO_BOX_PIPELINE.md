@@ -38,7 +38,7 @@ python3 -m rework_with_mediapipe.jobs.run_preprocess --process --limit 20
 - `mediapipe_review.db`
 - `mediapipe_review_artifacts/bundles/clip_xxxxxx/`
 
-每条 clip 会生成：
+每条 episode 会生成一个 bundle：
 
 - `bundle.json`
 - `proposals.npz`
@@ -66,7 +66,7 @@ python3 -m rework_with_mediapipe.jobs.run_fit --export
 
 这里的 `fit` 现在只是名字沿用，实际不会再做 MANO。
 
-每条已审核 clip 会生成：
+每条已审核 episode 会生成：
 
 - `fit.json`
 - `fit.npz`

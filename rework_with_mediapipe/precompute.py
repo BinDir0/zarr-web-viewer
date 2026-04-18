@@ -658,6 +658,7 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
 
     bundle = {
         "clip_id": clip_id,
+        "review_unit": "episode",
         "episode_id": clip.episode.episode_id,
         "episode_name": clip.episode.episode_name,
         "dataset_name": clip.episode.dataset_name,

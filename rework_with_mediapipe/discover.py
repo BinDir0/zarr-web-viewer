@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .config import MediaPipeReviewConfig
 from .types import ClipRef, EpisodeRef
@@ -191,50 +191,6 @@ def _load_factory_lookup(cfg: MediaPipeReviewConfig) -> Dict[str, EpisodeRef]:
     return lookup
 
 
-def _merge_spans(frame_indices: Iterable[int], max_gap: int) -> List[Tuple[int, int]]:
-    ordered = sorted({int(idx) for idx in frame_indices if int(idx) >= 0})
-    if not ordered:
-        return []
-    spans: List[Tuple[int, int]] = []
-    start = ordered[0]
-    prev = ordered[0]
-    for idx in ordered[1:]:
-        if idx - prev <= max_gap:
-            prev = idx
-            continue
-        spans.append((start, prev + 1))
-        start = idx
-        prev = idx
-    spans.append((start, prev + 1))
-    return spans
-
-
-def _slice_spans(
-    spans: List[Tuple[int, int]],
-    *,
-    num_frames: int,
-    context: int,
-    max_clip_frames: int,
-    overlap: int,
-) -> List[Tuple[int, int]]:
-    clips: List[Tuple[int, int]] = []
-    for start, end in spans:
-        clip_start = max(0, start - context)
-        clip_end = min(num_frames, end + context)
-        while clip_end - clip_start > max_clip_frames:
-            window_end = min(clip_start + max_clip_frames, num_frames)
-            clips.append((clip_start, window_end))
-            clip_start = max(0, window_end - overlap)
-        clips.append((clip_start, clip_end))
-    deduped: List[Tuple[int, int]] = []
-    seen = set()
-    for item in clips:
-        if item not in seen:
-            deduped.append(item)
-            seen.add(item)
-    return deduped
-
-
 def _parse_dirty_frames(row: sqlite3.Row) -> Tuple[str, List[int]]:
     content = str(row["content"] or "")
     if content.startswith("REWORK_V1:"):
@@ -263,33 +219,44 @@ def _parse_dirty_frames(row: sqlite3.Row) -> Tuple[str, List[int]]:
 def discover_dirty_clips(cfg: MediaPipeReviewConfig) -> List[ClipRef]:
     factory_lookup = _load_factory_lookup(cfg)
     rows = _load_annotation_rows(cfg.source_annotations_db)
-    clips: List[ClipRef] = []
+    aggregated: Dict[str, Dict[str, object]] = {}
     for row in rows:
         if not is_factory_dataset_name(row["dataset_name"]):
             continue
         dirty_reason, bad_frames = _parse_dirty_frames(row)
         if not bad_frames:
             continue
-        episode = factory_lookup.get(str(row["episode_id"]))
+        episode_id = str(row["episode_id"])
+        episode = factory_lookup.get(episode_id)
         if episode is None or episode.num_frames <= 0:
             continue
-        spans = _merge_spans(bad_frames, cfg.clip_merge_gap)
-        windows = _slice_spans(
-            spans,
-            num_frames=episode.num_frames,
-            context=cfg.clip_context_frames,
-            max_clip_frames=cfg.max_clip_frames,
-            overlap=cfg.overlap_frames,
+        entry = aggregated.setdefault(
+            episode_id,
+            {
+                "episode": episode,
+                "bad_frames": set(),
+                "dirty_reasons": set(),
+            },
         )
-        for clip_start, clip_end in windows:
-            clip_bad = [idx for idx in bad_frames if clip_start <= idx < clip_end]
-            clips.append(
-                ClipRef(
-                    episode=episode,
-                    clip_start=clip_start,
-                    clip_end=clip_end,
-                    dirty_reason=dirty_reason,
-                    bad_frames=clip_bad,
-                )
+        entry["bad_frames"].update(int(idx) for idx in bad_frames if 0 <= int(idx) < episode.num_frames)
+        entry["dirty_reasons"].add(dirty_reason)
+
+    clips: List[ClipRef] = []
+    for episode_id in sorted(aggregated.keys()):
+        entry = aggregated[episode_id]
+        episode = entry["episode"]
+        bad_frames = sorted(entry["bad_frames"])
+        if not bad_frames:
+            continue
+        dirty_reasons = sorted(str(item) for item in entry["dirty_reasons"] if item)
+        dirty_reason = dirty_reasons[0] if len(dirty_reasons) == 1 else "episode_box_issue"
+        clips.append(
+            ClipRef(
+                episode=episode,
+                clip_start=0,
+                clip_end=int(episode.num_frames),
+                dirty_reason=dirty_reason,
+                bad_frames=bad_frames,
             )
+        )
     return clips

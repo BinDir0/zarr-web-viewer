@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>YOLO Clip Review</title>
+    <title>YOLO Episode Review</title>
     <link rel="stylesheet" href="{{ url_for('mediapipe_review.static', filename='mediapipe_review.css') }}">
   </head>
   <body class="mpr-page">
@@ -11,7 +11,7 @@
       <header class="mpr-header">
         <a class="mpr-link" href="{{ url_for('mediapipe_review.dashboard', start_rank=start_rank) }}">返回 Dashboard</a>
         <div class="mpr-header-copy">
-          <div id="mpr-title">Loading clip {{ clip_id }}...</div>
+          <div id="mpr-title">Loading episode {{ clip_id }}...</div>
           <div id="mpr-subtitle" class="mpr-meta-note"></div>
         </div>
       </header>
@@ -56,7 +56,7 @@
           </section>
 
           <section class="mpr-card mpr-submit-card">
-            <button id="mpr-submit-review" class="mpr-btn mpr-btn-primary" type="button">提交整条 Clip</button>
+            <button id="mpr-submit-review" class="mpr-btn mpr-btn-primary" type="button">提交整条 Episode</button>
             <div id="mpr-submit-message" class="mpr-meta-note"></div>
           </section>
         </section>

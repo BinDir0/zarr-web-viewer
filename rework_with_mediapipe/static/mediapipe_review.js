@@ -23,7 +23,7 @@ function renderSummary(summary) {
     if (summary.next_clip_id) {
       if (startLink) {
         startLink.href = `/mediapipe/clip/${summary.next_clip_id}?start_rank=${startRank}`;
-        startLink.textContent = `开始审核第 ${startRank} 条 Clip ${summary.next_clip_id}`;
+        startLink.textContent = `打开第 ${startRank} 条 Episode ${summary.next_clip_id}`;
         startLink.style.display = "";
       }
       if (startEmpty) startEmpty.style.display = "none";
@@ -31,7 +31,7 @@ function renderSummary(summary) {
       if (startLink) startLink.style.display = "none";
       if (startEmpty) startEmpty.style.display = "";
       if (startEmpty) {
-        startEmpty.textContent = `从第 ${startRank} 条开始时，当前没有 ready_for_review 的 clip`;
+        startEmpty.textContent = `从第 ${startRank} 条开始时，当前没有已预处理 episode`;
       }
     }
   }
@@ -451,7 +451,7 @@ if (reviewNode) {
       window.location.href = `/mediapipe/clip/${data.next_clip_id}?start_rank=${startRank}`;
       return;
     }
-    submitMessage.textContent = "提交成功，没有更多 ready clip。";
+    submitMessage.textContent = "提交成功，没有更多 ready episode。";
   }
 
   function hydrateFromExistingReview(reviewPayload) {
@@ -533,11 +533,11 @@ if (reviewNode) {
     const data = await response.json();
     bundle = data.bundle;
     if (!bundle) {
-      titleNode.textContent = "这个 clip 还没有可用的 bundle。";
+      titleNode.textContent = "这个 episode 还没有可用的 bundle。";
       return;
     }
     if (!getBaseKeyframes().length) {
-      titleNode.textContent = "这个 clip 没有可审核的关键帧。";
+      titleNode.textContent = "这个 episode 没有可审核的关键帧。";
       return;
     }
     (bundle.frame_tracks || []).forEach((item) => {
@@ -546,7 +546,7 @@ if (reviewNode) {
     (bundle.frames || []).forEach((item) => {
       frameMetaByFrameIdx.set(Number(item.frame_idx), item);
     });
-    titleNode.textContent = `${bundle.episode_name} · frames ${bundle.clip_start}-${bundle.clip_end}`;
+    titleNode.textContent = `${bundle.episode_name} · 全 episode · ${((bundle.frames || []).length)} 帧`;
     subtitleNode.textContent = `${bundle.dirty_reason} · ${getBaseKeyframes().length} 个基础关键帧 · ${(bundle.segments || []).length} 个稳定段`;
     hydrateFromExistingReview(data.clip?.review_payload_json);
     const firstPending = getReviewFrames().findIndex((frame) => !ensureReviewEntry(frame)?.confirmed);

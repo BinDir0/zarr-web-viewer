@@ -17,7 +17,14 @@ def export_clip_manifest(cfg: MediaPipeReviewConfig) -> Dict:
 
     conn = connect(cfg.db_path)
     rows = conn.execute(
-        "SELECT * FROM clips WHERE status = 'fit_ok' AND fit_payload_json IS NOT NULL ORDER BY id"
+        """
+        SELECT * FROM clips
+        WHERE status = 'fit_ok'
+          AND fit_payload_json IS NOT NULL
+          AND clip_start = 0
+          AND clip_end = num_frames
+        ORDER BY id
+        """
     ).fetchall()
     items: List[Dict] = []
     with manifest_path.open("w", encoding="utf-8") as f:
@@ -38,6 +45,7 @@ def export_clip_manifest(cfg: MediaPipeReviewConfig) -> Dict:
                 item = {
                     "clip_id": int(row["id"]),
                     "parent_clip_id": int(row["id"]),
+                    "review_unit": "episode",
                     "subepisode_index": int(subepisode.get("subepisode_index", 0)),
                     "episode_id": str(row["episode_id"]),
                     "episode_name": str(row["episode_name"] or row["episode_id"]),
@@ -62,6 +70,7 @@ def export_clip_manifest(cfg: MediaPipeReviewConfig) -> Dict:
         "manifest_path": str(manifest_path),
         "summary_path": str(summary_path),
         "num_clips": len(rows),
+        "num_episodes": len(rows),
         "num_items": len(items),
         "items": items[:10],
     }
@@ -74,6 +83,7 @@ def export_clip_manifest(cfg: MediaPipeReviewConfig) -> Dict:
             "summary_path": str(summary_path),
             "exported_at": datetime.utcnow().isoformat(),
             "num_clips": len(rows),
+            "num_episodes": len(rows),
             "num_items": len(items),
         }
         conn.executemany(

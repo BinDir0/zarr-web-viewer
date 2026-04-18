@@ -12,7 +12,7 @@ from ..types import ClipRef, EpisodeRef
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Discover dirty clips and precompute YOLO review bundles.")
+    parser = argparse.ArgumentParser(description="Discover dirty episodes and precompute YOLO review bundles.")
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--discover", action="store_true")
     parser.add_argument("--process", action="store_true")
@@ -44,6 +44,8 @@ def main() -> None:
                 """
                 SELECT id, source_json FROM clips
                 WHERE status IN ('queued_preprocess', 'failed')
+                  AND clip_start = 0
+                  AND clip_end = num_frames
                 ORDER BY id
                 LIMIT ?
                 """,
@@ -70,11 +72,11 @@ def main() -> None:
                     )
                     update_clip_status(conn, clip_id, status=next_status, bundle_relpath=result["bundle_relpath"])
                     processed += 1
-                    print(f"[preprocess] clip={clip_id} status={next_status}")
+                    print(f"[preprocess] episode={clip_id} status={next_status}")
                 except Exception as exc:
                     traceback.print_exc()
                     update_clip_status(conn, clip_id, status="failed", error_message=str(exc))
-                    print(f"[preprocess] clip={clip_id} failed: {exc}")
+                    print(f"[preprocess] episode={clip_id} failed: {exc}")
     print(json.dumps({"discovered": discovered, "processed": processed}, ensure_ascii=False))
 
 
