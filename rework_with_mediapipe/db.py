@@ -197,6 +197,48 @@ def _backfill_clip_review_units(conn: sqlite3.Connection) -> None:
         conn.executemany("UPDATE clips SET review_unit = ? WHERE id = ?", updates)
 
 
+def _episode_definition_changed(
+    row: sqlite3.Row,
+    *,
+    source_json: Dict[str, Any],
+    clip_start: int,
+    clip_end: int,
+    num_frames: int,
+    dirty_reason: str,
+) -> bool:
+    previous_source = str(row["source_json"] or "")
+    current_source = _dumps(source_json)
+    return any(
+        [
+            int(row["clip_start"]) != int(clip_start),
+            int(row["clip_end"]) != int(clip_end),
+            int(row["num_frames"]) != int(num_frames),
+            str(row["dirty_reason"] or "") != str(dirty_reason),
+            previous_source != current_source,
+        ]
+    )
+
+
+def _reset_clip_runtime_state(conn: sqlite3.Connection, clip_id: int, *, next_status: str) -> None:
+    conn.execute("DELETE FROM candidate_chains WHERE clip_id = ?", (clip_id,))
+    conn.execute("DELETE FROM vendor_reviews WHERE clip_id = ?", (clip_id,))
+    conn.execute("DELETE FROM fit_jobs WHERE clip_id = ?", (clip_id,))
+    conn.execute(
+        """
+        UPDATE clips
+        SET status = ?,
+            bundle_relpath = NULL,
+            review_payload_json = NULL,
+            fit_payload_json = NULL,
+            export_payload_json = NULL,
+            error_message = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (next_status, clip_id),
+    )
+
+
 def upsert_clip(
     conn: sqlite3.Connection,
     *,
@@ -220,7 +262,8 @@ def upsert_clip(
     if review_unit == "episode":
         existing = conn.execute(
             """
-            SELECT id FROM clips
+            SELECT *
+            FROM clips
             WHERE episode_id = ? AND review_unit = 'episode'
             ORDER BY id
             LIMIT 1
@@ -228,6 +271,15 @@ def upsert_clip(
             (episode_id,),
         ).fetchone()
         if existing is not None:
+            clip_id = int(existing["id"])
+            definition_changed = _episode_definition_changed(
+                existing,
+                source_json=source_json,
+                clip_start=clip_start,
+                clip_end=clip_end,
+                num_frames=num_frames,
+                dirty_reason=dirty_reason,
+            )
             conn.execute(
                 """
                 UPDATE clips
@@ -259,11 +311,13 @@ def upsert_clip(
                     review_unit,
                     dirty_reason,
                     status,
-                    int(existing["id"]),
+                    clip_id,
                 ),
             )
+            if definition_changed:
+                _reset_clip_runtime_state(conn, clip_id, next_status=status)
             conn.commit()
-            return int(existing["id"])
+            return clip_id
     conn.execute(
         """
         INSERT INTO clips (

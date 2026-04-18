@@ -141,6 +141,36 @@ def _bbox_area(bbox_xyxy: List[float]) -> float:
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
 
 
+def _split_reasons_for_track_step(
+    prev: Proposal,
+    curr: Proposal,
+    *,
+    image_size: Tuple[int, int],
+    cfg: MediaPipeReviewConfig,
+) -> List[str]:
+    reasons: List[str] = []
+    frame_gap = int(curr.frame_idx) - int(prev.frame_idx)
+    if frame_gap > max(1, int(cfg.track_max_gap)):
+        reasons.append("gap")
+    if int(prev.class_id) != int(curr.class_id):
+        reasons.append("class_switch")
+
+    width, height = image_size
+    diag = max(math.hypot(float(width), float(height)), 1.0)
+    prev_center = _bbox_center(prev.bbox_xyxy)
+    curr_center = _bbox_center(curr.bbox_xyxy)
+    center_ratio = math.hypot(curr_center[0] - prev_center[0], curr_center[1] - prev_center[1]) / diag
+    if center_ratio >= float(cfg.short_track_split_center_ratio):
+        reasons.append("center_jump")
+
+    prev_area = max(_bbox_area(prev.bbox_xyxy), 1.0)
+    curr_area = max(_bbox_area(curr.bbox_xyxy), 1.0)
+    area_ratio = curr_area / prev_area
+    if area_ratio >= float(cfg.short_track_split_area_ratio_high) or area_ratio <= float(cfg.short_track_split_area_ratio_low):
+        reasons.append("scale_jump")
+    return reasons
+
+
 def _resize_for_review(image: Image.Image, preview_width: int) -> Image.Image:
     width, height = image.size
     if width <= preview_width:
@@ -303,6 +333,8 @@ def _build_yolo_tracks(
     per_frame_proposals: Dict[int, List[Proposal]],
     *,
     bad_frame_indices: List[int],
+    image_size: Tuple[int, int],
+    cfg: MediaPipeReviewConfig,
     min_frames: int,
 ) -> List[Dict]:
     bad_frames = {int(item) for item in bad_frame_indices}
@@ -312,34 +344,67 @@ def _build_yolo_tracks(
             grouped[int(proposal.track_id)].append(proposal)
 
     tracks: List[Dict] = []
-    for track_id, proposals in grouped.items():
+    next_track_id = 0
+    for source_track_id, proposals in grouped.items():
         proposals.sort(key=lambda item: int(item.frame_idx))
-        frames = [int(item.frame_idx) for item in proposals]
-        num_frames = len(frames)
-        intersects_bad_frames = any(frame_idx in bad_frames for frame_idx in frames)
-        if num_frames < max(1, min_frames) and not intersects_bad_frames:
-            continue
-        preview_idx = frames[len(frames) // 2]
-        mean_score = float(sum(float(item.score) for item in proposals) / max(1, len(proposals)))
-        class_ids = [int(item.class_id) for item in proposals]
-        class_id = max(set(class_ids), key=class_ids.count)
-        class_name = next((str(item.class_name) for item in proposals if int(item.class_id) == class_id), str(class_id))
-        tracks.append(
-            {
-                "track_id": int(track_id),
-                "role_hint": f"class_{class_name}",
-                "score": float(num_frames) + mean_score + (3.0 if intersects_bad_frames else 0.0),
-                "start_frame": min(frames),
-                "end_frame": max(frames),
-                "num_frames": num_frames,
-                "preview_frame": preview_idx,
-                "frames": frames,
-                "intersects_bad_frames": intersects_bad_frames,
-                "class_id": class_id,
-                "class_name": class_name,
-                "proposals": [proposal.to_dict() for proposal in proposals],
-            }
-        )
+        subchains: List[Tuple[List[Proposal], List[str]]] = []
+        current_chain: List[Proposal] = []
+        current_breaks: List[str] = []
+        for proposal in proposals:
+            if not current_chain:
+                current_chain = [proposal]
+                current_breaks = []
+                continue
+            split_reasons = _split_reasons_for_track_step(
+                current_chain[-1],
+                proposal,
+                image_size=image_size,
+                cfg=cfg,
+            )
+            if max(0, int(cfg.short_track_max_frames)) and len(current_chain) >= int(cfg.short_track_max_frames):
+                split_reasons.append("max_span")
+            if split_reasons:
+                subchains.append((current_chain, current_breaks))
+                current_chain = [proposal]
+                current_breaks = split_reasons
+            else:
+                current_chain.append(proposal)
+        if current_chain:
+            subchains.append((current_chain, current_breaks))
+
+        for chain_proposals, chain_start_reasons in subchains:
+            frames = [int(item.frame_idx) for item in chain_proposals]
+            num_frames = len(frames)
+            intersects_bad_frames = any(frame_idx in bad_frames for frame_idx in frames)
+            if num_frames < max(1, min_frames) and not intersects_bad_frames:
+                continue
+            preview_idx = frames[len(frames) // 2]
+            mean_score = float(sum(float(item.score) for item in chain_proposals) / max(1, len(chain_proposals)))
+            class_ids = [int(item.class_id) for item in chain_proposals]
+            class_id = max(set(class_ids), key=class_ids.count)
+            class_name = next(
+                (str(item.class_name) for item in chain_proposals if int(item.class_id) == class_id),
+                str(class_id),
+            )
+            tracks.append(
+                {
+                    "track_id": int(next_track_id),
+                    "source_track_id": int(source_track_id),
+                    "role_hint": f"class_{class_name}",
+                    "score": float(num_frames) + mean_score + (3.0 if intersects_bad_frames else 0.0),
+                    "start_frame": min(frames),
+                    "end_frame": max(frames),
+                    "num_frames": num_frames,
+                    "preview_frame": preview_idx,
+                    "frames": frames,
+                    "intersects_bad_frames": intersects_bad_frames,
+                    "class_id": class_id,
+                    "class_name": class_name,
+                    "split_from_previous_reasons": list(chain_start_reasons),
+                    "proposals": [proposal.to_dict() for proposal in chain_proposals],
+                }
+            )
+            next_track_id += 1
     tracks.sort(
         key=lambda item: (
             not bool(item["intersects_bad_frames"]),
@@ -679,9 +744,12 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
     first_pass_seconds = time.perf_counter() - first_pass_start
     decode_seconds = max(0.0, first_pass_seconds - detector_infer_seconds - tracker_association_seconds)
 
+    image_size = tuple(frame_sizes[ordered_frame_indices[0]]["preview_size"]) if ordered_frame_indices else (0, 0)
     tracks = _build_yolo_tracks(
         per_frame_proposals,
         bad_frame_indices=clip.bad_frames,
+        image_size=image_size,
+        cfg=cfg,
         min_frames=cfg.min_chain_frames,
     )
     visible_tracks = list(tracks)
@@ -689,7 +757,6 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
 
     bad_frame_lookup = {int(frame_idx) for frame_idx in clip.bad_frames}
     frame_tracks, visible_track_ids = _build_frame_tracks(ordered_frame_indices, visible_tracks)
-    image_size = tuple(frame_sizes[ordered_frame_indices[0]]["preview_size"]) if ordered_frame_indices else (0, 0)
     keyframe_build_start = time.perf_counter()
     motion_scores, motion_reasons = _compute_motion_scores(visible_tracks, ordered_frame_indices, image_size, cfg)
     segments, keyframes, frame_to_segment = _build_segments_and_keyframes(

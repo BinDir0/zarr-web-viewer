@@ -415,7 +415,7 @@ def _resolve_track_interval(
     last_known = known_positions[-1]
     invalid_frames.update(int(item) for item in interval_frames[:first_known])
     invalid_frames.update(int(item) for item in interval_frames[last_known + 1 :])
-    max_gap = max(1, int(cfg.recovery_anchor_stride_frames))
+    max_gap = max(1, int(cfg.track_max_gap))
     for left_pos, right_pos in zip(known_positions, known_positions[1:]):
         gap = right_pos - left_pos - 1
         if gap <= 0:
