@@ -546,7 +546,7 @@ if (reviewNode) {
     (bundle.frames || []).forEach((item) => {
       frameMetaByFrameIdx.set(Number(item.frame_idx), item);
     });
-    titleNode.textContent = `${bundle.episode_name} · 全 episode · ${((bundle.frames || []).length)} 帧`;
+    titleNode.textContent = `${bundle.episode_name} · 全 episode · ${Number(bundle.num_frames || (bundle.frames || []).length)} 帧`;
     subtitleNode.textContent = `${bundle.dirty_reason} · ${getBaseKeyframes().length} 个基础关键帧 · ${(bundle.segments || []).length} 个稳定段`;
     hydrateFromExistingReview(data.clip?.review_payload_json);
     const firstPending = getReviewFrames().findIndex((frame) => !ensureReviewEntry(frame)?.confirmed);

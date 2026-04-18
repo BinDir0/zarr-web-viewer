@@ -67,10 +67,24 @@ def _dependency_status(cfg: MediaPipeReviewConfig) -> Dict[str, Any]:
 def _summary_payload(cfg: MediaPipeReviewConfig, *, start_rank: int = 1) -> Dict[str, Any]:
     queue_offset = max(0, int(start_rank) - 1)
     with open_db(cfg.db_path) as conn:
-        counts = count_clips_by_status(conn)
-        start_clip = get_preprocessed_clip_by_offset(conn, offset=queue_offset)
-        reviewed = list_clips_by_statuses(conn, ["reviewed_ready_for_fit", "fit_ok", "exported"], limit=5)
-        queued_fit = list_fit_jobs(conn, status="queued_fit", limit=5)
+        counts = count_clips_by_status(conn, min_num_frames=cfg.min_export_episode_frames)
+        start_clip = get_preprocessed_clip_by_offset(
+            conn,
+            offset=queue_offset,
+            min_num_frames=cfg.min_export_episode_frames,
+        )
+        reviewed = list_clips_by_statuses(
+            conn,
+            ["reviewed_ready_for_fit", "fit_ok", "exported"],
+            limit=5,
+            min_num_frames=cfg.min_export_episode_frames,
+        )
+        queued_fit = list_fit_jobs(
+            conn,
+            status="queued_fit",
+            limit=5,
+            min_num_frames=cfg.min_export_episode_frames,
+        )
     return {
         "counts": counts,
         "requested_start_rank": int(start_rank),
@@ -93,6 +107,40 @@ def _load_bundle(cfg: MediaPipeReviewConfig, bundle_relpath: str) -> Dict[str, A
     bundle_path = cfg.artifact_abspath(bundle_relpath) / "bundle.json"
     with bundle_path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _compact_bundle_for_review(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    keyframes = list(bundle.get("keyframes", []))
+    segments = list(bundle.get("segments", []))
+    needed_frame_indices = {int(item["frame_idx"]) for item in keyframes}
+    for segment in segments:
+        needed_frame_indices.update(int(frame_idx) for frame_idx in segment.get("recovery_candidate_frames", []))
+
+    frame_map = {int(item["frame_idx"]): item for item in bundle.get("frames", [])}
+    frame_tracks_map = {int(item["frame_idx"]): item for item in bundle.get("frame_tracks", [])}
+    compact_frames = [frame_map[frame_idx] for frame_idx in sorted(needed_frame_indices) if frame_idx in frame_map]
+    compact_frame_tracks = [
+        frame_tracks_map[frame_idx]
+        for frame_idx in sorted(needed_frame_indices)
+        if frame_idx in frame_tracks_map
+    ]
+
+    return {
+        "clip_id": bundle.get("clip_id"),
+        "review_unit": bundle.get("review_unit"),
+        "episode_id": bundle.get("episode_id"),
+        "episode_name": bundle.get("episode_name"),
+        "dataset_name": bundle.get("dataset_name"),
+        "clip_start": bundle.get("clip_start"),
+        "clip_end": bundle.get("clip_end"),
+        "num_frames": len(bundle.get("frames", [])),
+        "dirty_reason": bundle.get("dirty_reason"),
+        "track_generation": bundle.get("track_generation", ""),
+        "frames": compact_frames,
+        "frame_tracks": compact_frame_tracks,
+        "segments": segments,
+        "keyframes": keyframes,
+    }
 
 
 def _normalize_legacy_review_payload(payload: Dict[str, Any], bundle: Dict[str, Any]) -> Dict[str, Any]:
@@ -372,9 +420,18 @@ def api_next_clip():
     after_clip_id = request.args.get("after_clip_id", default=None, type=int)
     with open_db(cfg.db_path) as conn:
         if after_clip_id is not None:
-            row = get_next_clip_by_status_after_id(conn, "ready_for_review", after_clip_id=after_clip_id)
+            row = get_next_clip_by_status_after_id(
+                conn,
+                "ready_for_review",
+                after_clip_id=after_clip_id,
+                min_num_frames=cfg.min_export_episode_frames,
+            )
         else:
-            row = get_preprocessed_clip_by_offset(conn, offset=queue_offset)
+            row = get_preprocessed_clip_by_offset(
+                conn,
+                offset=queue_offset,
+                min_num_frames=cfg.min_export_episode_frames,
+            )
     return jsonify(
         {
             "success": True,
@@ -394,7 +451,7 @@ def api_clip(clip_id: int):
     if not clip.get("bundle_relpath"):
         return jsonify({"success": True, "clip": clip, "bundle": None})
     bundle = _load_bundle(cfg, clip["bundle_relpath"])
-    return jsonify({"success": True, "clip": clip, "bundle": bundle})
+    return jsonify({"success": True, "clip": clip, "bundle": _compact_bundle_for_review(bundle)})
 
 
 @mediapipe_review_bp.post("/api/mediapipe/clips/<int:clip_id>/submit-review")
@@ -423,5 +480,10 @@ def api_submit_review(clip_id: int):
             clip_id=clip_id,
             review_payload=review_payload,
         )
-        next_row = get_next_clip_by_status_after_id(conn, "ready_for_review", after_clip_id=clip_id)
+        next_row = get_next_clip_by_status_after_id(
+            conn,
+            "ready_for_review",
+            after_clip_id=clip_id,
+            min_num_frames=cfg.min_export_episode_frames,
+        )
     return jsonify({"success": True, "next_clip_id": int(next_row["id"]) if next_row else None})

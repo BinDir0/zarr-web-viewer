@@ -230,6 +230,8 @@ def discover_dirty_clips(cfg: MediaPipeReviewConfig) -> List[ClipRef]:
         episode = factory_lookup.get(episode_id)
         if episode is None or episode.num_frames <= 0:
             continue
+        if int(episode.num_frames) < int(cfg.min_export_episode_frames):
+            continue
         entry = aggregated.setdefault(
             episode_id,
             {

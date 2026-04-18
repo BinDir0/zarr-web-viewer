@@ -45,10 +45,11 @@ def main() -> None:
                 SELECT id, source_json FROM clips
                 WHERE status IN ('queued_preprocess', 'failed')
                   AND review_unit = 'episode'
+                  AND num_frames >= ?
                 ORDER BY id
                 LIMIT ?
                 """,
-                (args.limit,),
+                (cfg.min_export_episode_frames, args.limit),
             ).fetchall()
             for row in rows:
                 payload = json.loads(row["source_json"])

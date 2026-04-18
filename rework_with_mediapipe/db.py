@@ -171,9 +171,12 @@ def _infer_review_unit(
     return "clip"
 
 
-def _episode_review_predicate(table_alias: Optional[str] = None) -> str:
+def _episode_review_predicate(table_alias: Optional[str] = None, min_num_frames: int = 0) -> str:
     prefix = f"{table_alias}." if table_alias else ""
-    return f"{prefix}review_unit = 'episode'"
+    clauses = [f"{prefix}review_unit = 'episode'"]
+    if int(min_num_frames) > 0:
+        clauses.append(f"{prefix}num_frames >= {int(min_num_frames)}")
+    return " AND ".join(clauses)
 
 
 def _backfill_clip_review_units(conn: sqlite3.Connection) -> None:
@@ -427,53 +430,74 @@ def replace_candidate_chains(conn: sqlite3.Connection, clip_id: int, chains: Ite
     conn.commit()
 
 
-def list_clips_by_status(conn: sqlite3.Connection, status: str, limit: int = 100) -> List[sqlite3.Row]:
+def list_clips_by_status(
+    conn: sqlite3.Connection,
+    status: str,
+    limit: int = 100,
+    min_num_frames: int = 0,
+) -> List[sqlite3.Row]:
     return conn.execute(
-        f"SELECT * FROM clips WHERE status = ? AND {_episode_review_predicate()} ORDER BY id LIMIT ?",
+        f"SELECT * FROM clips WHERE status = ? AND {_episode_review_predicate(min_num_frames=min_num_frames)} ORDER BY id LIMIT ?",
         (status, limit),
     ).fetchall()
 
 
-def get_clip_by_status_offset(conn: sqlite3.Connection, status: str, offset: int = 0) -> Optional[sqlite3.Row]:
+def get_clip_by_status_offset(
+    conn: sqlite3.Connection,
+    status: str,
+    offset: int = 0,
+    min_num_frames: int = 0,
+) -> Optional[sqlite3.Row]:
     return conn.execute(
-        f"SELECT * FROM clips WHERE status = ? AND {_episode_review_predicate()} ORDER BY id LIMIT 1 OFFSET ?",
+        f"SELECT * FROM clips WHERE status = ? AND {_episode_review_predicate(min_num_frames=min_num_frames)} ORDER BY id LIMIT 1 OFFSET ?",
         (status, max(0, int(offset))),
     ).fetchone()
 
 
-def get_preprocessed_clip_by_offset(conn: sqlite3.Connection, offset: int = 0) -> Optional[sqlite3.Row]:
+def get_preprocessed_clip_by_offset(conn: sqlite3.Connection, offset: int = 0, min_num_frames: int = 0) -> Optional[sqlite3.Row]:
     return conn.execute(
         """
         SELECT * FROM clips
         WHERE bundle_relpath IS NOT NULL
           AND review_unit = 'episode'
+          AND num_frames >= ?
         ORDER BY id
         LIMIT 1 OFFSET ?
         """,
-        (max(0, int(offset)),),
+        (max(0, int(min_num_frames)), max(0, int(offset))),
     ).fetchone()
 
 
-def get_next_clip_by_status_after_id(conn: sqlite3.Connection, status: str, after_clip_id: int) -> Optional[sqlite3.Row]:
+def get_next_clip_by_status_after_id(
+    conn: sqlite3.Connection,
+    status: str,
+    after_clip_id: int,
+    min_num_frames: int = 0,
+) -> Optional[sqlite3.Row]:
     return conn.execute(
-        f"SELECT * FROM clips WHERE status = ? AND id > ? AND {_episode_review_predicate()} ORDER BY id LIMIT 1",
+        f"SELECT * FROM clips WHERE status = ? AND id > ? AND {_episode_review_predicate(min_num_frames=min_num_frames)} ORDER BY id LIMIT 1",
         (status, int(after_clip_id)),
     ).fetchone()
 
 
-def list_clips_by_statuses(conn: sqlite3.Connection, statuses: Sequence[str], limit: int = 100) -> List[sqlite3.Row]:
+def list_clips_by_statuses(
+    conn: sqlite3.Connection,
+    statuses: Sequence[str],
+    limit: int = 100,
+    min_num_frames: int = 0,
+) -> List[sqlite3.Row]:
     if not statuses:
         return []
     placeholders = ",".join(["?"] * len(statuses))
     return conn.execute(
-        f"SELECT * FROM clips WHERE status IN ({placeholders}) AND {_episode_review_predicate()} ORDER BY id LIMIT ?",
+        f"SELECT * FROM clips WHERE status IN ({placeholders}) AND {_episode_review_predicate(min_num_frames=min_num_frames)} ORDER BY id LIMIT ?",
         list(statuses) + [limit],
     ).fetchall()
 
 
-def count_clips_by_status(conn: sqlite3.Connection) -> Dict[str, int]:
+def count_clips_by_status(conn: sqlite3.Connection, min_num_frames: int = 0) -> Dict[str, int]:
     rows = conn.execute(
-        f"SELECT status, COUNT(*) AS n FROM clips WHERE {_episode_review_predicate()} GROUP BY status"
+        f"SELECT status, COUNT(*) AS n FROM clips WHERE {_episode_review_predicate(min_num_frames=min_num_frames)} GROUP BY status"
     ).fetchall()
     return {str(row["status"]): int(row["n"]) for row in rows}
 
@@ -633,14 +657,14 @@ def save_vendor_review(
     conn.commit()
 
 
-def list_fit_jobs(conn: sqlite3.Connection, status: str = "queued_fit", limit: int = 20) -> List[sqlite3.Row]:
+def list_fit_jobs(conn: sqlite3.Connection, status: str = "queued_fit", limit: int = 20, min_num_frames: int = 0) -> List[sqlite3.Row]:
     return conn.execute(
         f"""
         SELECT fit_jobs.*
         FROM fit_jobs
         INNER JOIN clips ON clips.id = fit_jobs.clip_id
         WHERE fit_jobs.status = ?
-          AND {_episode_review_predicate('clips')}
+          AND {_episode_review_predicate('clips', min_num_frames=min_num_frames)}
         ORDER BY fit_jobs.updated_at DESC, fit_jobs.clip_id DESC
         LIMIT ?
         """,
