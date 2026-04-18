@@ -44,8 +44,7 @@ def main() -> None:
                 """
                 SELECT id, source_json FROM clips
                 WHERE status IN ('queued_preprocess', 'failed')
-                  AND clip_start = 0
-                  AND clip_end = num_frames
+                  AND review_unit = 'episode'
                 ORDER BY id
                 LIMIT ?
                 """,

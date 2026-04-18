@@ -21,8 +21,7 @@ def export_clip_manifest(cfg: MediaPipeReviewConfig) -> Dict:
         SELECT * FROM clips
         WHERE status = 'fit_ok'
           AND fit_payload_json IS NOT NULL
-          AND clip_start = 0
-          AND clip_end = num_frames
+          AND review_unit = 'episode'
         ORDER BY id
         """
     ).fetchall()

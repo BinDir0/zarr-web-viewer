@@ -14,6 +14,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout = 15000")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
+    init_db(conn)
     return conn
 
 
@@ -29,6 +30,7 @@ SCHEMA = [
         clip_start INTEGER NOT NULL,
         clip_end INTEGER NOT NULL,
         num_frames INTEGER NOT NULL,
+        review_unit TEXT NOT NULL DEFAULT 'clip',
         dirty_reason TEXT NOT NULL,
         status TEXT NOT NULL,
         bundle_relpath TEXT,
@@ -96,6 +98,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     for statement in SCHEMA:
         conn.execute(statement)
     _ensure_column(conn, "vendor_reviews", "review_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(conn, "clips", "review_unit", "TEXT NOT NULL DEFAULT 'clip'")
+    _backfill_clip_review_units(conn)
     conn.commit()
 
 
@@ -111,7 +115,6 @@ def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, 
 def open_db(db_path: Path) -> Iterator[sqlite3.Connection]:
     conn = connect(db_path)
     try:
-        init_db(conn)
         yield conn
     finally:
         conn.close()
@@ -127,13 +130,71 @@ def _loads(payload: Optional[str], default: Any = None) -> Any:
     return json.loads(payload)
 
 
-def _is_episode_unit(clip_start: int, clip_end: int, num_frames: int) -> bool:
-    return int(num_frames) > 0 and int(clip_start) == 0 and int(clip_end) == int(num_frames)
+def _infer_review_unit(
+    *,
+    clip_start: int,
+    clip_end: int,
+    num_frames: int,
+    source_json: Optional[str] = None,
+    source_payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    payload = source_payload
+    if payload is None and source_json:
+        try:
+            payload = _loads(source_json, {})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+    payload = payload or {}
+    episode = payload.get("episode") or {}
+    try:
+        episode_num_frames = int(episode.get("num_frames", 0))
+    except (TypeError, ValueError):
+        episode_num_frames = 0
+    try:
+        payload_clip_start = int(payload.get("clip_start", -1))
+    except (TypeError, ValueError):
+        payload_clip_start = -1
+    try:
+        payload_clip_end = int(payload.get("clip_end", -1))
+    except (TypeError, ValueError):
+        payload_clip_end = -1
+    if (
+        int(clip_start) == 0
+        and int(clip_end) > 0
+        and int(num_frames) == int(clip_end)
+        and episode_num_frames > 0
+        and int(clip_end) == episode_num_frames
+        and payload_clip_start == 0
+        and payload_clip_end == episode_num_frames
+    ):
+        return "episode"
+    return "clip"
 
 
-def _episode_unit_predicate(table_alias: Optional[str] = None) -> str:
+def _episode_review_predicate(table_alias: Optional[str] = None) -> str:
     prefix = f"{table_alias}." if table_alias else ""
-    return f"{prefix}clip_start = 0 AND {prefix}clip_end = {prefix}num_frames"
+    return f"{prefix}review_unit = 'episode'"
+
+
+def _backfill_clip_review_units(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, clip_start, clip_end, num_frames, source_json, review_unit
+        FROM clips
+        """
+    ).fetchall()
+    updates: List[tuple[str, int]] = []
+    for row in rows:
+        inferred = _infer_review_unit(
+            clip_start=int(row["clip_start"]),
+            clip_end=int(row["clip_end"]),
+            num_frames=int(row["num_frames"]),
+            source_json=str(row["source_json"] or ""),
+        )
+        if str(row["review_unit"] or "clip") != inferred:
+            updates.append((inferred, int(row["id"])))
+    if updates:
+        conn.executemany("UPDATE clips SET review_unit = ? WHERE id = ?", updates)
 
 
 def upsert_clip(
@@ -150,15 +211,21 @@ def upsert_clip(
     dirty_reason: str,
     status: str,
 ) -> int:
-    if _is_episode_unit(clip_start, clip_end, num_frames):
+    review_unit = _infer_review_unit(
+        clip_start=clip_start,
+        clip_end=clip_end,
+        num_frames=num_frames,
+        source_payload=source_json,
+    )
+    if review_unit == "episode":
         existing = conn.execute(
             """
             SELECT id FROM clips
-            WHERE episode_id = ? AND clip_start = ? AND clip_end = ? AND num_frames = ?
+            WHERE episode_id = ? AND review_unit = 'episode'
             ORDER BY id
             LIMIT 1
             """,
-            (episode_id, clip_start, clip_end, num_frames),
+            (episode_id,),
         ).fetchone()
         if existing is not None:
             conn.execute(
@@ -168,7 +235,10 @@ def upsert_clip(
                     dataset_name = ?,
                     source_type = ?,
                     source_json = ?,
+                    clip_start = ?,
+                    clip_end = ?,
                     num_frames = ?,
+                    review_unit = ?,
                     dirty_reason = ?,
                     status = CASE
                         WHEN clips.status IN ('queued_preprocess', 'preprocessing', 'failed')
@@ -183,7 +253,10 @@ def upsert_clip(
                     dataset_name,
                     source_type,
                     _dumps(source_json),
+                    clip_start,
+                    clip_end,
                     num_frames,
+                    review_unit,
                     dirty_reason,
                     status,
                     int(existing["id"]),
@@ -195,14 +268,15 @@ def upsert_clip(
         """
         INSERT INTO clips (
             episode_id, episode_name, dataset_name, source_type, source_json,
-            clip_start, clip_end, num_frames, dirty_reason, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            clip_start, clip_end, num_frames, review_unit, dirty_reason, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(episode_id, clip_start, clip_end, dirty_reason) DO UPDATE SET
             episode_name = excluded.episode_name,
             dataset_name = excluded.dataset_name,
             source_type = excluded.source_type,
             source_json = excluded.source_json,
             num_frames = excluded.num_frames,
+            review_unit = excluded.review_unit,
             status = CASE
                 WHEN clips.status IN ('queued_preprocess', 'preprocessing', 'failed')
                     THEN excluded.status
@@ -219,6 +293,7 @@ def upsert_clip(
             clip_start,
             clip_end,
             num_frames,
+            review_unit,
             dirty_reason,
             status,
         ),
@@ -300,14 +375,14 @@ def replace_candidate_chains(conn: sqlite3.Connection, clip_id: int, chains: Ite
 
 def list_clips_by_status(conn: sqlite3.Connection, status: str, limit: int = 100) -> List[sqlite3.Row]:
     return conn.execute(
-        f"SELECT * FROM clips WHERE status = ? AND {_episode_unit_predicate()} ORDER BY id LIMIT ?",
+        f"SELECT * FROM clips WHERE status = ? AND {_episode_review_predicate()} ORDER BY id LIMIT ?",
         (status, limit),
     ).fetchall()
 
 
 def get_clip_by_status_offset(conn: sqlite3.Connection, status: str, offset: int = 0) -> Optional[sqlite3.Row]:
     return conn.execute(
-        f"SELECT * FROM clips WHERE status = ? AND {_episode_unit_predicate()} ORDER BY id LIMIT 1 OFFSET ?",
+        f"SELECT * FROM clips WHERE status = ? AND {_episode_review_predicate()} ORDER BY id LIMIT 1 OFFSET ?",
         (status, max(0, int(offset))),
     ).fetchone()
 
@@ -317,8 +392,7 @@ def get_preprocessed_clip_by_offset(conn: sqlite3.Connection, offset: int = 0) -
         """
         SELECT * FROM clips
         WHERE bundle_relpath IS NOT NULL
-          AND clip_start = 0
-          AND clip_end = num_frames
+          AND review_unit = 'episode'
         ORDER BY id
         LIMIT 1 OFFSET ?
         """,
@@ -328,7 +402,7 @@ def get_preprocessed_clip_by_offset(conn: sqlite3.Connection, offset: int = 0) -
 
 def get_next_clip_by_status_after_id(conn: sqlite3.Connection, status: str, after_clip_id: int) -> Optional[sqlite3.Row]:
     return conn.execute(
-        f"SELECT * FROM clips WHERE status = ? AND id > ? AND {_episode_unit_predicate()} ORDER BY id LIMIT 1",
+        f"SELECT * FROM clips WHERE status = ? AND id > ? AND {_episode_review_predicate()} ORDER BY id LIMIT 1",
         (status, int(after_clip_id)),
     ).fetchone()
 
@@ -338,14 +412,14 @@ def list_clips_by_statuses(conn: sqlite3.Connection, statuses: Sequence[str], li
         return []
     placeholders = ",".join(["?"] * len(statuses))
     return conn.execute(
-        f"SELECT * FROM clips WHERE status IN ({placeholders}) AND {_episode_unit_predicate()} ORDER BY id LIMIT ?",
+        f"SELECT * FROM clips WHERE status IN ({placeholders}) AND {_episode_review_predicate()} ORDER BY id LIMIT ?",
         list(statuses) + [limit],
     ).fetchall()
 
 
 def count_clips_by_status(conn: sqlite3.Connection) -> Dict[str, int]:
     rows = conn.execute(
-        f"SELECT status, COUNT(*) AS n FROM clips WHERE {_episode_unit_predicate()} GROUP BY status"
+        f"SELECT status, COUNT(*) AS n FROM clips WHERE {_episode_review_predicate()} GROUP BY status"
     ).fetchall()
     return {str(row["status"]): int(row["n"]) for row in rows}
 
@@ -512,7 +586,7 @@ def list_fit_jobs(conn: sqlite3.Connection, status: str = "queued_fit", limit: i
         FROM fit_jobs
         INNER JOIN clips ON clips.id = fit_jobs.clip_id
         WHERE fit_jobs.status = ?
-          AND {_episode_unit_predicate('clips')}
+          AND {_episode_review_predicate('clips')}
         ORDER BY fit_jobs.updated_at DESC, fit_jobs.clip_id DESC
         LIMIT ?
         """,
