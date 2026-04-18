@@ -92,7 +92,6 @@ if (reviewNode) {
   const rightMissingBox = document.getElementById("mpr-right-missing-box");
   const clearLeftButton = document.getElementById("mpr-clear-left");
   const clearRightButton = document.getElementById("mpr-clear-right");
-  const confirmButton = document.getElementById("mpr-confirm-keyframe");
   const assignmentSummary = document.getElementById("mpr-assignment-summary");
   const keyframeList = document.getElementById("mpr-keyframe-list");
   const stripSummary = document.getElementById("mpr-strip-summary");
@@ -202,6 +201,12 @@ if (reviewNode) {
     return ensureReviewEntry(getCurrentFrame());
   }
 
+  function markReviewConfirmed(frame = getCurrentFrame()) {
+    const review = ensureReviewEntry(frame);
+    if (!review) return;
+    review.confirmed = true;
+  }
+
   function visibleTracksForFrame(frameIdx) {
     return frameTracksByFrameIdx.get(Number(frameIdx))?.tracks || [];
   }
@@ -250,6 +255,10 @@ if (reviewNode) {
   function selectReviewFrame(index) {
     const reviewFrames = getReviewFrames();
     if (!reviewFrames.length) return;
+    const currentFrame = getCurrentFrame();
+    if (currentFrame) {
+      markReviewConfirmed(currentFrame);
+    }
     currentReviewFrameIndex = Math.max(0, Math.min(index, reviewFrames.length - 1));
     renderCurrentFrameImage();
     renderReviewState();
@@ -259,9 +268,9 @@ if (reviewNode) {
     const review = getCurrentReview();
     if (!review) return;
     const currentFrameIdx = review.frame_idx;
-    review.confirmed = false;
     review[`${side}_mode`] = "not_visible";
     review[`${side}_track_id`] = null;
+    review.confirmed = true;
     ensureCurrentReviewFrame(currentFrameIdx);
     renderReviewState();
     drawOverlay();
@@ -271,13 +280,13 @@ if (reviewNode) {
     const review = getCurrentReview();
     if (!review) return;
     const currentFrameIdx = review.frame_idx;
-    review.confirmed = false;
     if (checked) {
       review[`${side}_mode`] = "visible_unrecoverable";
       review[`${side}_track_id`] = null;
     } else if (review[`${side}_mode`] === "visible_unrecoverable") {
       review[`${side}_mode`] = "not_visible";
     }
+    review.confirmed = true;
     ensureCurrentReviewFrame(currentFrameIdx);
     renderReviewState();
     drawOverlay();
@@ -287,7 +296,6 @@ if (reviewNode) {
     const review = getCurrentReview();
     if (!review) return;
     const currentFrameIdx = review.frame_idx;
-    review.confirmed = false;
     if (review[`${side}_mode`] === "track" && Number(review[`${side}_track_id`]) === Number(trackId)) {
       review[`${side}_mode`] = "not_visible";
       review[`${side}_track_id`] = null;
@@ -300,16 +308,10 @@ if (reviewNode) {
       review[`${otherSide}_mode`] = "not_visible";
       review[`${otherSide}_track_id`] = null;
     }
+    review.confirmed = true;
     ensureCurrentReviewFrame(currentFrameIdx);
     renderReviewState();
     drawOverlay();
-  }
-
-  function confirmCurrentReviewFrame() {
-    const review = getCurrentReview();
-    if (!review) return;
-    review.confirmed = true;
-    renderReviewState();
   }
 
   function renderReviewState() {
@@ -325,7 +327,6 @@ if (reviewNode) {
     keyframeStatus.textContent = review.confirmed ? "已确认" : "待确认";
     leftMissingBox.checked = review.left_mode === "visible_unrecoverable";
     rightMissingBox.checked = review.right_mode === "visible_unrecoverable";
-    confirmButton.textContent = review.confirmed ? "重新确认当前审核帧" : "确认当前审核帧";
     assignmentSummary.textContent = frameRoleSummary(review);
     viewerHint.textContent = "左键点 proposal=左手，右键点 proposal=右手；←/→ 切换审核帧。";
     stripSummary.textContent = `${reviewFrames.filter((item) => ensureReviewEntry(item)?.confirmed).length}/${reviewFrames.length} 已确认`;
@@ -430,6 +431,8 @@ if (reviewNode) {
   }
 
   async function submitReview() {
+    markReviewConfirmed();
+    renderReviewState();
     if (!allConfirmed()) {
       submitMessage.textContent = "还有审核帧未确认，不能提交。";
       return;
@@ -503,7 +506,6 @@ if (reviewNode) {
   rightMissingBox.onchange = () => setUnrecoverable("right", rightMissingBox.checked);
   clearLeftButton.onclick = () => setSideNotVisible("left");
   clearRightButton.onclick = () => setSideNotVisible("right");
-  confirmButton.onclick = confirmCurrentReviewFrame;
   prevKeyframeButton.onclick = () => {
     selectReviewFrame(currentReviewFrameIndex - 1);
   };

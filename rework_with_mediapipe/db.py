@@ -153,7 +153,11 @@ def upsert_clip(
             source_type = excluded.source_type,
             source_json = excluded.source_json,
             num_frames = excluded.num_frames,
-            status = excluded.status,
+            status = CASE
+                WHEN clips.status IN ('queued_preprocess', 'preprocessing', 'failed')
+                    THEN excluded.status
+                ELSE clips.status
+            END,
             updated_at = CURRENT_TIMESTAMP
         """,
         (
@@ -437,7 +441,7 @@ def save_vendor_review(
 
 def list_fit_jobs(conn: sqlite3.Connection, status: str = "queued_fit", limit: int = 20) -> List[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM fit_jobs WHERE status = ? ORDER BY updated_at LIMIT ?",
+        "SELECT * FROM fit_jobs WHERE status = ? ORDER BY updated_at DESC, clip_id DESC LIMIT ?",
         (status, limit),
     ).fetchall()
 

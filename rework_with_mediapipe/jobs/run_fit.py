@@ -14,17 +14,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Aggregate reviewed box tracks and export manifest.")
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--clip-id", type=int, action="append", default=None)
     parser.add_argument("--export", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     conn = connect(cfg.db_path)
     try:
-        jobs = list_fit_jobs(conn, status="queued_fit", limit=args.limit)
+        if args.clip_id:
+            jobs = [{"clip_id": int(clip_id)} for clip_id in args.clip_id]
+        else:
+            jobs = list_fit_jobs(conn, status="queued_fit", limit=args.limit)
         for job in jobs:
             clip_id = int(job["clip_id"])
             clip = conn.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
-            if clip is None or not clip["bundle_relpath"] or not clip["review_payload_json"]:
+            if clip is None:
+                print(f"[fit] clip={clip_id} missing")
+                continue
+            if not clip["bundle_relpath"] or not clip["review_payload_json"]:
                 save_fit_result(conn, clip_id, "qa_needed", {"status": "qa_needed", "message": "Missing review/bundle"})
                 continue
             bundle_dir = cfg.artifact_abspath(str(clip["bundle_relpath"]))
@@ -36,7 +43,10 @@ def main() -> None:
                 fit_payload = fit_reviewed_clip(bundle, review_payload, cfg)
                 save_fit_artifacts(bundle_dir, fit_payload)
                 save_fit_result(conn, clip_id, fit_payload["status"], fit_payload)
-                print(f"[fit] clip={clip_id} status={fit_payload['status']}")
+                print(
+                    f"[fit] clip={clip_id} range={bundle.get('clip_start')}-{bundle.get('clip_end')} "
+                    f"frames={len(bundle.get('frames', []))} status={fit_payload['status']}"
+                )
             except Exception as exc:
                 traceback.print_exc()
                 save_fit_result(conn, clip_id, "qa_needed", {"status": "qa_needed", "message": str(exc)})
