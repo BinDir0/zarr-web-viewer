@@ -46,13 +46,13 @@ class ClipRef:
 class Proposal:
     frame_idx: int
     det_idx: int
-    track_id: int
+    proposal_id: str
     bbox_xyxy: List[float]
     bbox_xyxy_orig: List[float]
     score: float
     class_id: int
     class_name: str
-    roi_rotation_2d: float
+    detector_name: str
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

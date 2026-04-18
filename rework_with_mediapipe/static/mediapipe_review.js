@@ -60,19 +60,13 @@ if (dashboardNode) {
   };
   if (startRankInput) {
     startRankInput.addEventListener("input", () => {
-      refreshSummary().catch((error) => {
-        console.error(error);
-      });
+      refreshSummary().catch((error) => console.error(error));
     });
     startRankInput.addEventListener("change", () => {
-      refreshSummary().catch((error) => {
-        console.error(error);
-      });
+      refreshSummary().catch((error) => console.error(error));
     });
   }
-  refreshSummary().catch((error) => {
-    console.error(error);
-  });
+  refreshSummary().catch((error) => console.error(error));
 }
 
 if (reviewNode) {
@@ -88,10 +82,13 @@ if (reviewNode) {
   const keyframeReasons = document.getElementById("mpr-keyframe-reasons");
   const keyframeStatus = document.getElementById("mpr-keyframe-status");
   const viewerHint = document.getElementById("mpr-viewer-hint");
-  const leftMissingButton = document.getElementById("mpr-left-missing-box");
-  const rightMissingButton = document.getElementById("mpr-right-missing-box");
-  const leftNotVisibleButton = document.getElementById("mpr-left-not-visible");
-  const rightNotVisibleButton = document.getElementById("mpr-right-not-visible");
+  const leftAbsentButton = document.getElementById("mpr-left-not-visible");
+  const rightAbsentButton = document.getElementById("mpr-right-not-visible");
+  const leftUnusableButton = document.getElementById("mpr-left-unusable");
+  const rightUnusableButton = document.getElementById("mpr-right-unusable");
+  const leftManualButton = document.getElementById("mpr-left-manual-box");
+  const rightManualButton = document.getElementById("mpr-right-manual-box");
+  const drawStatus = document.getElementById("mpr-draw-status");
   const assignmentSummary = document.getElementById("mpr-assignment-summary");
   const stripSummary = document.getElementById("mpr-strip-summary");
   const jumpInput = document.getElementById("mpr-jump-input");
@@ -102,23 +99,16 @@ if (reviewNode) {
   let bundle = null;
   let currentReviewFrameIndex = 0;
   let drawnBoxes = [];
-  let cachedReviewFrames = null;
+  let activeDrawSide = null;
+  let draftBox = null;
+  let dragState = null;
+  const frameMetaByFrameIdx = new Map();
+  const frameProposalsByFrameIdx = new Map();
+  const frameReviewByFrame = new Map();
   const imagePreloadCache = new Map();
 
-  const frameTracksByFrameIdx = new Map();
-  const frameMetaByFrameIdx = new Map();
-  const frameReviewByFrame = new Map();
-
-  function getBaseKeyframes() {
-    return bundle?.keyframes || [];
-  }
-
-  function invalidateReviewFrames() {
-    cachedReviewFrames = null;
-  }
-
-  function frameSegmentId(frameIdx) {
-    return Number(frameMetaByFrameIdx.get(Number(frameIdx))?.segment_id ?? -1);
+  function getReviewFrames() {
+    return bundle?.review_frames || [];
   }
 
   function ensureReviewEntry(frame) {
@@ -129,80 +119,19 @@ if (reviewNode) {
       review = {
         frame_idx: frameIdx,
         confirmed: false,
-        left_mode: "not_visible",
-        right_mode: "not_visible",
-        left_track_id: null,
-        right_track_id: null,
+        left_mode: "absent",
+        right_mode: "absent",
+        left_proposal_id: null,
+        right_proposal_id: null,
+        left_manual_bbox_xyxy_orig: null,
+        right_manual_bbox_xyxy_orig: null,
       };
       frameReviewByFrame.set(frameIdx, review);
     }
     return review;
   }
 
-  function segmentNeedsRecovery(segmentId) {
-    for (const review of frameReviewByFrame.values()) {
-      if (frameSegmentId(review.frame_idx) !== Number(segmentId)) continue;
-      if (review.left_mode === "visible_unrecoverable" || review.right_mode === "visible_unrecoverable") return true;
-    }
-    return false;
-  }
-
-  function buildRecoveryFrame(frameIdx, segmentId) {
-    const frameMeta = frameMetaByFrameIdx.get(Number(frameIdx));
-    if (!frameMeta) return null;
-    return {
-      frame_idx: Number(frameIdx),
-      relpath: frameMeta.relpath,
-      segment_id: Number(segmentId),
-      kind: "recovery",
-      reasons: ["recovery_anchor"],
-      visible_track_ids: frameMeta.visible_track_ids || [],
-      is_recovery_frame: true,
-    };
-  }
-
-  function getReviewFrames() {
-    if (!bundle) return [];
-    if (cachedReviewFrames) return cachedReviewFrames;
-    const merged = new Map();
-    getBaseKeyframes().forEach((item) => {
-      merged.set(Number(item.frame_idx), {
-        ...item,
-        is_recovery_frame: false,
-      });
-    });
-    for (const segment of bundle.segments || []) {
-      const segmentId = Number(segment.segment_id);
-      if (!segmentNeedsRecovery(segmentId)) continue;
-      for (const frameIdx of segment.recovery_candidate_frames || []) {
-        if (merged.has(Number(frameIdx))) continue;
-        const recoveryFrame = buildRecoveryFrame(frameIdx, segmentId);
-        if (recoveryFrame) merged.set(Number(frameIdx), recoveryFrame);
-      }
-    }
-    cachedReviewFrames = Array.from(merged.values()).sort((a, b) => Number(a.frame_idx) - Number(b.frame_idx));
-    return cachedReviewFrames;
-  }
-
-  function ensureCurrentReviewFrame(preferredFrameIdx = null) {
-    const reviewFrames = getReviewFrames();
-    if (!reviewFrames.length) {
-      currentReviewFrameIndex = 0;
-      return;
-    }
-    const currentFrameIdx = preferredFrameIdx != null
-      ? Number(preferredFrameIdx)
-      : Number(reviewFrames[currentReviewFrameIndex]?.frame_idx);
-    const nextIndex = reviewFrames.findIndex((item) => Number(item.frame_idx) === currentFrameIdx);
-    if (nextIndex >= 0) {
-      currentReviewFrameIndex = nextIndex;
-      return;
-    }
-    currentReviewFrameIndex = Math.max(0, Math.min(currentReviewFrameIndex, reviewFrames.length - 1));
-  }
-
   function getCurrentFrame() {
-    ensureCurrentReviewFrame();
     return getReviewFrames()[currentReviewFrameIndex] || null;
   }
 
@@ -214,32 +143,6 @@ if (reviewNode) {
     const review = ensureReviewEntry(frame);
     if (!review) return;
     review.confirmed = true;
-  }
-
-  function visibleTracksForFrame(frameIdx) {
-    return frameTracksByFrameIdx.get(Number(frameIdx))?.tracks || [];
-  }
-
-  function roleForTrack(trackId) {
-    const review = getCurrentReview();
-    if (!review) return "neutral";
-    if (review.left_mode === "track" && Number(review.left_track_id) === Number(trackId)) return "left";
-    if (review.right_mode === "track" && Number(review.right_track_id) === Number(trackId)) return "right";
-    return "neutral";
-  }
-
-  function sideSummary(review, side) {
-    const prefix = side === "left" ? "左手" : "右手";
-    const mode = review?.[`${side}_mode`] || "not_visible";
-    if (mode === "track") return `${prefix}=T${review[`${side}_track_id`]}`;
-    if (mode === "visible_unrecoverable") return `${prefix}=无法恢复`;
-    return `${prefix}=不可见`;
-  }
-
-  function frameRoleSummary(review) {
-    if (!review) return "未初始化";
-    const confirmLabel = review.confirmed ? "已确认" : "未确认";
-    return `${sideSummary(review, "left")} · ${sideSummary(review, "right")} · ${confirmLabel}`;
   }
 
   function allConfirmed() {
@@ -262,7 +165,7 @@ if (reviewNode) {
     return img;
   }
 
-  function warmImageWindow(centerIndex, radius = 3) {
+  function warmImageWindow(centerIndex, radius = 2) {
     const reviewFrames = getReviewFrames();
     const start = Math.max(0, centerIndex - radius);
     const end = Math.min(reviewFrames.length - 1, centerIndex + radius);
@@ -282,10 +185,102 @@ if (reviewNode) {
       return;
     }
     frameImage.dataset.src = src;
-    frameImage.onload = () => {
-      drawOverlay();
-    };
+    frameImage.onload = () => drawOverlay();
     frameImage.src = src;
+  }
+
+  function getProposalList(frameIdx) {
+    return frameProposalsByFrameIdx.get(Number(frameIdx))?.proposals || [];
+  }
+
+  function roleForProposal(proposalId) {
+    const review = getCurrentReview();
+    if (!review) return "neutral";
+    if (review.left_mode === "proposal" && review.left_proposal_id === proposalId) return "left";
+    if (review.right_mode === "proposal" && review.right_proposal_id === proposalId) return "right";
+    return "neutral";
+  }
+
+  function sideSummary(review, side) {
+    const prefix = side === "left" ? "左手" : "右手";
+    const mode = review?.[`${side}_mode`] || "absent";
+    if (mode === "proposal") return `${prefix}=候选框`;
+    if (mode === "manual_box") return `${prefix}=手动画框`;
+    if (mode === "unusable") return `${prefix}=不可用`;
+    return `${prefix}=不可见`;
+  }
+
+  function frameRoleSummary(review) {
+    if (!review) return "未初始化";
+    const confirmLabel = review.confirmed ? "已确认" : "待确认";
+    return `${sideSummary(review, "left")} · ${sideSummary(review, "right")} · ${confirmLabel}`;
+  }
+
+  function clearSide(review, side, mode) {
+    review[`${side}_mode`] = mode;
+    review[`${side}_proposal_id`] = null;
+    review[`${side}_manual_bbox_xyxy_orig`] = null;
+    review.confirmed = true;
+  }
+
+  function setSideAbsent(side) {
+    const review = getCurrentReview();
+    if (!review) return;
+    clearSide(review, side, "absent");
+    activeDrawSide = null;
+    renderReviewState();
+    drawOverlay();
+  }
+
+  function setSideUnusable(side) {
+    const review = getCurrentReview();
+    if (!review) return;
+    clearSide(review, side, "unusable");
+    activeDrawSide = null;
+    renderReviewState();
+    drawOverlay();
+  }
+
+  function beginManualBox(side) {
+    activeDrawSide = side;
+    draftBox = null;
+    dragState = null;
+    renderReviewState();
+    drawOverlay();
+  }
+
+  function assignProposal(side, proposalId) {
+    const review = getCurrentReview();
+    if (!review) return;
+    if (review[`${side}_mode`] === "proposal" && review[`${side}_proposal_id`] === proposalId) {
+      clearSide(review, side, "absent");
+    } else {
+      review[`${side}_mode`] = "proposal";
+      review[`${side}_proposal_id`] = proposalId;
+      review[`${side}_manual_bbox_xyxy_orig`] = null;
+      review.confirmed = true;
+    }
+    const otherSide = side === "left" ? "right" : "left";
+    if (review[`${otherSide}_mode`] === "proposal" && review[`${otherSide}_proposal_id`] === proposalId) {
+      clearSide(review, otherSide, "absent");
+    }
+    activeDrawSide = null;
+    renderReviewState();
+    drawOverlay();
+  }
+
+  function saveManualBox(side, bboxOrig) {
+    const review = getCurrentReview();
+    if (!review) return;
+    review[`${side}_mode`] = "manual_box";
+    review[`${side}_proposal_id`] = null;
+    review[`${side}_manual_bbox_xyxy_orig`] = bboxOrig;
+    review.confirmed = true;
+    activeDrawSide = null;
+    draftBox = null;
+    dragState = null;
+    renderReviewState();
+    drawOverlay();
   }
 
   function selectReviewFrame(index) {
@@ -296,113 +291,64 @@ if (reviewNode) {
       markReviewConfirmed(currentFrame);
     }
     currentReviewFrameIndex = Math.max(0, Math.min(index, reviewFrames.length - 1));
-    warmImageWindow(currentReviewFrameIndex);
+    activeDrawSide = null;
+    draftBox = null;
+    dragState = null;
     renderCurrentFrameImage();
     renderReviewState();
   }
 
-  function setSideNotVisible(side) {
-    const review = getCurrentReview();
-    if (!review) return;
-    const currentFrameIdx = review.frame_idx;
-    review[`${side}_mode`] = "not_visible";
-    review[`${side}_track_id`] = null;
-    review.confirmed = true;
-    invalidateReviewFrames();
-    ensureCurrentReviewFrame(currentFrameIdx);
-    renderReviewState();
-    drawOverlay();
-  }
-
-  function toggleUnrecoverable(side) {
-    const review = getCurrentReview();
-    if (!review) return;
-    const currentFrameIdx = review.frame_idx;
-    if (review[`${side}_mode`] === "visible_unrecoverable") {
-      review[`${side}_mode`] = "not_visible";
-    } else {
-      review[`${side}_mode`] = "visible_unrecoverable";
-      review[`${side}_track_id`] = null;
+  function renderReviewFrameSummary() {
+    const reviewFrames = getReviewFrames();
+    const total = reviewFrames.length;
+    const confirmed = reviewFrames.filter((frame) => ensureReviewEntry(frame)?.confirmed).length;
+    stripSummary.textContent = `${confirmed}/${total} 已确认`;
+    if (jumpInput) {
+      jumpInput.min = total > 0 ? "1" : "0";
+      jumpInput.max = String(Math.max(1, total));
+      jumpInput.value = total > 0 ? String(currentReviewFrameIndex + 1) : "0";
     }
-    review.confirmed = true;
-    invalidateReviewFrames();
-    ensureCurrentReviewFrame(currentFrameIdx);
-    renderReviewState();
-    drawOverlay();
-  }
-
-  function assignTrack(side, trackId) {
-    const review = getCurrentReview();
-    if (!review) return;
-    const currentFrameIdx = review.frame_idx;
-    if (review[`${side}_mode`] === "track" && Number(review[`${side}_track_id`]) === Number(trackId)) {
-      review[`${side}_mode`] = "not_visible";
-      review[`${side}_track_id`] = null;
-    } else {
-      review[`${side}_mode`] = "track";
-      review[`${side}_track_id`] = Number(trackId);
-    }
-    const otherSide = side === "left" ? "right" : "left";
-    if (review[`${otherSide}_mode`] === "track" && Number(review[`${otherSide}_track_id`]) === Number(trackId)) {
-      review[`${otherSide}_mode`] = "not_visible";
-      review[`${otherSide}_track_id`] = null;
-    }
-    review.confirmed = true;
-    invalidateReviewFrames();
-    ensureCurrentReviewFrame(currentFrameIdx);
-    renderReviewState();
-    drawOverlay();
   }
 
   function renderReviewState() {
-    ensureCurrentReviewFrame();
     const reviewFrame = getCurrentFrame();
     const review = getCurrentReview();
     if (!reviewFrame || !review) return;
     const reviewFrames = getReviewFrames();
     const reasons = (reviewFrame.reasons || []).join(" · ") || "无特殊原因";
-    const segment = (bundle.segments || []).find((item) => Number(item.segment_id) === Number(reviewFrame.segment_id));
     keyframeLabel.textContent = `审核帧 ${currentReviewFrameIndex + 1}/${reviewFrames.length} · frame ${reviewFrame.frame_idx}`;
-    keyframeReasons.textContent = `原因: ${reasons}${segment ? ` · 段 ${segment.start_frame}-${segment.end_frame}` : ""}`;
+    keyframeReasons.textContent = `原因: ${reasons} · uncertainty ${Number(reviewFrame.uncertainty || 0).toFixed(2)}`;
     keyframeStatus.textContent = review.confirmed ? "已确认" : "待确认";
-    leftMissingButton.classList.toggle("is-active", review.left_mode === "visible_unrecoverable");
-    rightMissingButton.classList.toggle("is-active", review.right_mode === "visible_unrecoverable");
-    leftNotVisibleButton.classList.toggle("is-active", review.left_mode === "not_visible");
-    rightNotVisibleButton.classList.toggle("is-active", review.right_mode === "not_visible");
+    leftAbsentButton.classList.toggle("is-active", review.left_mode === "absent");
+    rightAbsentButton.classList.toggle("is-active", review.right_mode === "absent");
+    leftUnusableButton.classList.toggle("is-active", review.left_mode === "unusable");
+    rightUnusableButton.classList.toggle("is-active", review.right_mode === "unusable");
+    leftManualButton.classList.toggle("is-active", activeDrawSide === "left");
+    rightManualButton.classList.toggle("is-active", activeDrawSide === "right");
     assignmentSummary.textContent = frameRoleSummary(review);
-    viewerHint.textContent = "左键点框=左手，右键点框=右手；下方按钮可快速标记不可见/可见但缺框；←/→ 切换审核帧。";
+    drawStatus.textContent = activeDrawSide ? `正在为${activeDrawSide === "left" ? "左手" : "右手"}拖拽画框。按 Esc 取消。` : "当前未启用手动画框。";
+    viewerHint.textContent = "左键点框=左手，右键点框=右手；1/2 启用手动画框；Q/E=不可见；A/D=不可用；←/→ 切换。";
     submitButton.disabled = !allConfirmed();
     prevKeyframeButton.disabled = currentReviewFrameIndex <= 0;
     nextKeyframeButton.disabled = currentReviewFrameIndex >= reviewFrames.length - 1;
-    renderReviewFrameList();
+    renderReviewFrameSummary();
   }
 
-  function renderReviewFrameList() {
-    const reviewFrames = getReviewFrames();
-    const total = reviewFrames.length;
-    const confirmedCount = reviewFrames.filter((item) => ensureReviewEntry(item)?.confirmed).length;
-    stripSummary.textContent = `${confirmedCount}/${total} 已确认`;
-    if (jumpInput) {
-      jumpInput.min = total > 0 ? "1" : "0";
-      jumpInput.max = String(Math.max(total, 1));
-      jumpInput.value = total > 0 ? String(currentReviewFrameIndex + 1) : "0";
-    }
-  }
-
-  function jumpToReviewFrame(rawValue) {
-    const reviewFrames = getReviewFrames();
-    if (!reviewFrames.length) return;
-    const parsed = Number(rawValue);
-    if (!Number.isFinite(parsed)) return;
-    const index = Math.trunc(parsed) - 1;
-    if (index < 0 || index >= reviewFrames.length) return;
-    selectReviewFrame(index);
+  function drawLabel(ctx, x, y, text, color) {
+    ctx.font = "bold 14px sans-serif";
+    const textWidth = ctx.measureText(text).width;
+    const labelX = x;
+    const labelY = Math.max(22, y);
+    ctx.fillStyle = color;
+    ctx.fillRect(labelX, labelY - 18, textWidth + 14, 22);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(text, labelX + 7, labelY - 4);
   }
 
   function drawOverlay() {
     const frame = getCurrentFrame();
     const review = getCurrentReview();
-    if (!frame || !frameImage.complete || !review) return;
+    if (!frame || !review || !frameImage.complete) return;
     overlayCanvas.width = frameImage.clientWidth;
     overlayCanvas.height = frameImage.clientHeight;
     const ctx = overlayCanvas.getContext("2d");
@@ -412,12 +358,12 @@ if (reviewNode) {
     const sy = overlayCanvas.height / naturalHeight;
     ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     drawnBoxes = [];
-    visibleTracksForFrame(frame.frame_idx).forEach((track) => {
-      const trackId = Number(track.track_id);
-      const role = roleForTrack(trackId);
+
+    getProposalList(frame.frame_idx).forEach((proposal, proposalIndex) => {
+      const proposalId = String(proposal.proposal_id);
+      const role = roleForProposal(proposalId);
       const color = role === "left" ? "#0f766e" : role === "right" ? "#b91c1c" : "#2563eb";
-      const label = role === "left" ? `L · T${trackId}` : role === "right" ? `R · T${trackId}` : `T${trackId}`;
-      const [x1, y1, x2, y2] = track.bbox_xyxy;
+      const [x1, y1, x2, y2] = proposal.bbox_xyxy;
       const left = x1 * sx;
       const top = y1 * sy;
       const width = (x2 - x1) * sx;
@@ -425,16 +371,11 @@ if (reviewNode) {
       ctx.strokeStyle = color;
       ctx.lineWidth = role === "neutral" ? 3 : 5;
       ctx.strokeRect(left, top, width, height);
-      ctx.font = "bold 15px sans-serif";
-      const textWidth = ctx.measureText(label).width;
-      const labelX = left;
-      const labelY = Math.max(24, top);
-      ctx.fillStyle = color;
-      ctx.fillRect(labelX, labelY - 20, textWidth + 16, 24);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText(label, labelX + 8, labelY - 4);
+      const detector = proposal.detector_name === "mediapipe_image" ? "MP" : "YOLO";
+      const labelPrefix = role === "left" ? "L" : role === "right" ? "R" : `P${proposalIndex + 1}`;
+      drawLabel(ctx, left, top, `${labelPrefix} · ${detector} ${Number(proposal.score || 0).toFixed(2)}`, color);
       drawnBoxes.push({
-        track_id: trackId,
+        proposal_id: proposalId,
         left,
         top,
         right: left + width,
@@ -442,22 +383,50 @@ if (reviewNode) {
         area: width * height,
       });
     });
+
+    ["left", "right"].forEach((side) => {
+      if (review[`${side}_mode`] !== "manual_box" || !review[`${side}_manual_bbox_xyxy_orig`]) return;
+      const frameMeta = frameMetaByFrameIdx.get(Number(frame.frame_idx));
+      if (!frameMeta) return;
+      const [origWidth, origHeight] = frameMeta.orig_size || [1, 1];
+      const [x1, y1, x2, y2] = review[`${side}_manual_bbox_xyxy_orig`];
+      const left = (x1 / Math.max(origWidth, 1)) * overlayCanvas.width;
+      const top = (y1 / Math.max(origHeight, 1)) * overlayCanvas.height;
+      const width = ((x2 - x1) / Math.max(origWidth, 1)) * overlayCanvas.width;
+      const height = ((y2 - y1) / Math.max(origHeight, 1)) * overlayCanvas.height;
+      const color = side === "left" ? "#ca8a04" : "#7c3aed";
+      ctx.strokeStyle = color;
+      ctx.setLineDash([8, 6]);
+      ctx.lineWidth = 4;
+      ctx.strokeRect(left, top, width, height);
+      ctx.setLineDash([]);
+      drawLabel(ctx, left, top, `${side === "left" ? "L" : "R"} · manual`, color);
+    });
+
+    if (draftBox) {
+      const color = activeDrawSide === "left" ? "#ca8a04" : "#7c3aed";
+      ctx.strokeStyle = color;
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 3;
+      ctx.strokeRect(draftBox.left, draftBox.top, draftBox.width, draftBox.height);
+      ctx.setLineDash([]);
+    }
   }
 
   function buildPayload() {
     return {
-      review_version: "frame_review_v2",
-      frame_reviews: getReviewFrames().map((reviewFrame) => {
-        const review = ensureReviewEntry(reviewFrame);
+      review_version: "frame_review_v3",
+      frame_reviews: getReviewFrames().map((frame) => {
+        const review = ensureReviewEntry(frame);
         return {
           frame_idx: Number(review.frame_idx),
           confirmed: Boolean(review.confirmed),
           left_mode: review.left_mode,
           right_mode: review.right_mode,
-          left_track_id: review.left_track_id == null ? null : Number(review.left_track_id),
-          right_track_id: review.right_track_id == null ? null : Number(review.right_track_id),
-          left_manual_bbox_xyxy_orig: null,
-          right_manual_bbox_xyxy_orig: null,
+          left_proposal_id: review.left_proposal_id,
+          right_proposal_id: review.right_proposal_id,
+          left_manual_bbox_xyxy_orig: review.left_manual_bbox_xyxy_orig,
+          right_manual_bbox_xyxy_orig: review.right_manual_bbox_xyxy_orig,
         };
       }),
     };
@@ -489,33 +458,46 @@ if (reviewNode) {
 
   function hydrateFromExistingReview(reviewPayload) {
     if (!reviewPayload || typeof reviewPayload !== "object") return;
-    const reviewVersion = String(reviewPayload.review_version || "");
-    if (reviewVersion === "frame_review_v2") {
-      (reviewPayload.frame_reviews || []).forEach((item) => {
-        const frameIdx = Number(item.frame_idx);
-        frameReviewByFrame.set(frameIdx, {
-          frame_idx: frameIdx,
-          confirmed: Boolean(item.confirmed),
-          left_mode: item.left_mode === "manual_box" ? "visible_unrecoverable" : (item.left_mode || "not_visible"),
-          right_mode: item.right_mode === "manual_box" ? "visible_unrecoverable" : (item.right_mode || "not_visible"),
-          left_track_id: item.left_track_id == null ? null : Number(item.left_track_id),
-          right_track_id: item.right_track_id == null ? null : Number(item.right_track_id),
-        });
-      });
-      return;
-    }
-    if (reviewVersion !== "keyframe_v1") return;
-    (reviewPayload.keyframe_reviews || []).forEach((item) => {
+    if (String(reviewPayload.review_version || "") !== "frame_review_v3") return;
+    (reviewPayload.frame_reviews || []).forEach((item) => {
       const frameIdx = Number(item.frame_idx);
       frameReviewByFrame.set(frameIdx, {
         frame_idx: frameIdx,
         confirmed: Boolean(item.confirmed),
-        left_mode: item.left_track_id != null ? "track" : item.left_missing_box ? "visible_unrecoverable" : "not_visible",
-        right_mode: item.right_track_id != null ? "track" : item.right_missing_box ? "visible_unrecoverable" : "not_visible",
-        left_track_id: item.left_track_id == null ? null : Number(item.left_track_id),
-        right_track_id: item.right_track_id == null ? null : Number(item.right_track_id),
+        left_mode: item.left_mode || "absent",
+        right_mode: item.right_mode || "absent",
+        left_proposal_id: item.left_proposal_id || null,
+        right_proposal_id: item.right_proposal_id || null,
+        left_manual_bbox_xyxy_orig: item.left_manual_bbox_xyxy_orig || null,
+        right_manual_bbox_xyxy_orig: item.right_manual_bbox_xyxy_orig || null,
       });
     });
+  }
+
+  function jumpToReviewFrame(rawValue) {
+    const reviewFrames = getReviewFrames();
+    if (!reviewFrames.length) return;
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed)) return;
+    const index = Math.trunc(parsed) - 1;
+    if (index < 0 || index >= reviewFrames.length) return;
+    selectReviewFrame(index);
+  }
+
+  function canvasPointToOrig(event) {
+    const frame = getCurrentFrame();
+    const frameMeta = frameMetaByFrameIdx.get(Number(frame?.frame_idx));
+    if (!frameMeta) return null;
+    const rect = overlayCanvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const [origWidth, origHeight] = frameMeta.orig_size || [1, 1];
+    return {
+      canvasX: x,
+      canvasY: y,
+      origX: (x / Math.max(overlayCanvas.width, 1)) * origWidth,
+      origY: (y / Math.max(overlayCanvas.height, 1)) * origHeight,
+    };
   }
 
   overlayCanvas.addEventListener("contextmenu", (event) => {
@@ -524,21 +506,72 @@ if (reviewNode) {
 
   overlayCanvas.addEventListener("mousedown", (event) => {
     event.preventDefault();
+    if (activeDrawSide) {
+      if (event.button !== 0) return;
+      const point = canvasPointToOrig(event);
+      if (!point) return;
+      dragState = {
+        side: activeDrawSide,
+        startOrigX: point.origX,
+        startOrigY: point.origY,
+        startCanvasX: point.canvasX,
+        startCanvasY: point.canvasY,
+      };
+      draftBox = { left: point.canvasX, top: point.canvasY, width: 0, height: 0 };
+      drawOverlay();
+      return;
+    }
+    if (event.button !== 0 && event.button !== 2) return;
     const rect = overlayCanvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
-    if (event.button !== 0 && event.button !== 2) return;
     const candidates = drawnBoxes
       .filter((item) => x >= item.left && x <= item.right && y >= item.top && y <= item.bottom)
       .sort((a, b) => a.area - b.area);
     if (!candidates.length) return;
-    assignTrack(event.button === 0 ? "left" : "right", candidates[0].track_id);
+    assignProposal(event.button === 0 ? "left" : "right", candidates[0].proposal_id);
   });
 
-  leftMissingButton.onclick = () => toggleUnrecoverable("left");
-  rightMissingButton.onclick = () => toggleUnrecoverable("right");
-  leftNotVisibleButton.onclick = () => setSideNotVisible("left");
-  rightNotVisibleButton.onclick = () => setSideNotVisible("right");
+  overlayCanvas.addEventListener("mousemove", (event) => {
+    if (!dragState) return;
+    const point = canvasPointToOrig(event);
+    if (!point) return;
+    draftBox = {
+      left: Math.min(dragState.startCanvasX, point.canvasX),
+      top: Math.min(dragState.startCanvasY, point.canvasY),
+      width: Math.abs(point.canvasX - dragState.startCanvasX),
+      height: Math.abs(point.canvasY - dragState.startCanvasY),
+    };
+    drawOverlay();
+  });
+
+  overlayCanvas.addEventListener("mouseup", (event) => {
+    if (!dragState) return;
+    const point = canvasPointToOrig(event);
+    if (!point) return;
+    const x1 = Math.min(dragState.startOrigX, point.origX);
+    const y1 = Math.min(dragState.startOrigY, point.origY);
+    const x2 = Math.max(dragState.startOrigX, point.origX);
+    const y2 = Math.max(dragState.startOrigY, point.origY);
+    const minSpan = 4;
+    const side = dragState.side;
+    dragState = null;
+    if (x2 - x1 < minSpan || y2 - y1 < minSpan) {
+      draftBox = null;
+      activeDrawSide = null;
+      renderReviewState();
+      drawOverlay();
+      return;
+    }
+    saveManualBox(side, [x1, y1, x2, y2]);
+  });
+
+  leftAbsentButton.onclick = () => setSideAbsent("left");
+  rightAbsentButton.onclick = () => setSideAbsent("right");
+  leftUnusableButton.onclick = () => setSideUnusable("left");
+  rightUnusableButton.onclick = () => setSideUnusable("right");
+  leftManualButton.onclick = () => beginManualBox("left");
+  rightManualButton.onclick = () => beginManualBox("right");
   if (jumpGoButton) {
     jumpGoButton.onclick = () => jumpToReviewFrame(jumpInput?.value);
   }
@@ -549,12 +582,8 @@ if (reviewNode) {
       jumpToReviewFrame(jumpInput.value);
     });
   }
-  prevKeyframeButton.onclick = () => {
-    selectReviewFrame(currentReviewFrameIndex - 1);
-  };
-  nextKeyframeButton.onclick = () => {
-    selectReviewFrame(currentReviewFrameIndex + 1);
-  };
+  prevKeyframeButton.onclick = () => selectReviewFrame(currentReviewFrameIndex - 1);
+  nextKeyframeButton.onclick = () => selectReviewFrame(currentReviewFrameIndex + 1);
   submitButton.onclick = submitReview;
 
   document.addEventListener("keydown", (event) => {
@@ -570,44 +599,54 @@ if (reviewNode) {
       selectReviewFrame(currentReviewFrameIndex + 1);
     } else if (event.key === "q" || event.key === "Q") {
       event.preventDefault();
-      setSideNotVisible("left");
+      setSideAbsent("left");
     } else if (event.key === "e" || event.key === "E") {
       event.preventDefault();
-      setSideNotVisible("right");
+      setSideAbsent("right");
     } else if (event.key === "a" || event.key === "A") {
       event.preventDefault();
-      toggleUnrecoverable("left");
+      setSideUnusable("left");
     } else if (event.key === "d" || event.key === "D") {
       event.preventDefault();
-      toggleUnrecoverable("right");
+      setSideUnusable("right");
+    } else if (event.key === "1") {
+      event.preventDefault();
+      beginManualBox("left");
+    } else if (event.key === "2") {
+      event.preventDefault();
+      beginManualBox("right");
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      activeDrawSide = null;
+      draftBox = null;
+      dragState = null;
+      renderReviewState();
+      drawOverlay();
     }
   });
 
-  window.addEventListener("resize", () => {
-    drawOverlay();
-  });
+  window.addEventListener("resize", () => drawOverlay());
 
   async function boot() {
     const response = await fetch(`/api/mediapipe/clips/${clipId}`);
     const data = await response.json();
+    if (!response.ok || !data.success) {
+      titleNode.textContent = data.message || "加载失败";
+      return;
+    }
     bundle = data.bundle;
     if (!bundle) {
       titleNode.textContent = "这个 episode 还没有可用的 bundle。";
       return;
     }
-    if (!getBaseKeyframes().length) {
-      titleNode.textContent = "这个 episode 没有可审核的关键帧。";
-      return;
-    }
-    invalidateReviewFrames();
-    (bundle.frame_tracks || []).forEach((item) => {
-      frameTracksByFrameIdx.set(Number(item.frame_idx), item);
-    });
     (bundle.frames || []).forEach((item) => {
       frameMetaByFrameIdx.set(Number(item.frame_idx), item);
     });
-    titleNode.textContent = `${bundle.episode_name} · 全 episode · ${Number(bundle.num_frames || (bundle.frames || []).length)} 帧`;
-    subtitleNode.textContent = `${bundle.dirty_reason} · ${getBaseKeyframes().length} 个基础关键帧 · ${(bundle.segments || []).length} 个稳定段`;
+    (bundle.frame_proposals || []).forEach((item) => {
+      frameProposalsByFrameIdx.set(Number(item.frame_idx), item);
+    });
+    titleNode.textContent = `${bundle.episode_name} · 全 episode · ${Number(bundle.num_frames || 0)} 帧`;
+    subtitleNode.textContent = `${bundle.dirty_reason} · ${getReviewFrames().length} 个审核帧`;
     hydrateFromExistingReview(data.clip?.review_payload_json);
     const firstPending = getReviewFrames().findIndex((frame) => !ensureReviewEntry(frame)?.confirmed);
     currentReviewFrameIndex = firstPending >= 0 ? firstPending : 0;

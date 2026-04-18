@@ -537,7 +537,31 @@ def save_vendor_review(
     review_payload: Dict[str, Any],
 ) -> None:
     review_version = str(review_payload.get("review_version") or "")
-    if review_version == "frame_review_v2":
+    if review_version == "frame_review_v3":
+        frame_reviews = list(review_payload.get("frame_reviews", []))
+        left_choices = sorted(
+            {
+                str(item["left_proposal_id"])
+                for item in frame_reviews
+                if item.get("left_mode") == "proposal" and item.get("left_proposal_id")
+            }
+        )
+        right_choices = sorted(
+            {
+                str(item["right_proposal_id"])
+                for item in frame_reviews
+                if item.get("right_mode") == "proposal" and item.get("right_proposal_id")
+            }
+        )
+        payload = {
+            "review_version": "frame_review_v3",
+            "frame_reviews": frame_reviews,
+        }
+        left_track_ids = left_choices
+        right_track_ids = right_choices
+        review_confidence = "frame_review_v3"
+        should_exclude = False
+    elif review_version == "frame_review_v2":
         frame_reviews = list(review_payload.get("frame_reviews", []))
         left_track_ids = sorted(
             {

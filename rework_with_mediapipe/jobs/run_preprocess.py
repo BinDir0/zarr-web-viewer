@@ -5,7 +5,7 @@ import json
 import traceback
 
 from ..config import load_config
-from ..db import open_db, replace_candidate_chains, update_clip_status, upsert_clip
+from ..db import open_db, update_clip_status, upsert_clip
 from ..discover import discover_dirty_clips
 from ..precompute import preprocess_clip
 from ..types import ClipRef, EpisodeRef
@@ -64,7 +64,6 @@ def main() -> None:
                 update_clip_status(conn, clip_id, status="preprocessing")
                 try:
                     result = preprocess_clip(clip, clip_id, cfg)
-                    replace_candidate_chains(conn, clip_id, result["tracks"])
                     next_status = "ready_for_review"
                     update_clip_status(conn, clip_id, status=next_status, bundle_relpath=result["bundle_relpath"])
                     processed += 1
@@ -72,11 +71,10 @@ def main() -> None:
                     print(
                         "[preprocess] "
                         f"episode={clip_id} status={next_status} "
-                        f"tracker={result['bundle'].get('track_generation', '')} "
                         f"total={timing.get('total_seconds', 0.0):.2f}s "
-                        f"decode={timing.get('frame_decode_seconds', 0.0):.2f}s "
-                        f"infer={timing.get('detector_infer_seconds', 0.0):.2f}s "
-                        f"track={timing.get('tracker_association_seconds', 0.0):.2f}s "
+                        f"primary={timing.get('primary_infer_seconds', 0.0):.2f}s "
+                        f"fallback={timing.get('fallback_infer_seconds', 0.0):.2f}s "
+                        f"keyframes={timing.get('keyframe_build_seconds', 0.0):.2f}s "
                         f"artifacts={timing.get('artifact_write_seconds', 0.0):.2f}s"
                     )
                 except Exception as exc:
