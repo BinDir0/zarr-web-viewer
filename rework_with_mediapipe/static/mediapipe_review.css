@@ -323,6 +323,22 @@ body.mpr-page {
   margin: 0;
 }
 
+.mpr-jump-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.mpr-jump-label {
+  font-weight: 600;
+  color: #4b3d2b;
+}
+
+.mpr-jump-input {
+  width: 144px;
+}
+
 .mpr-keyframe-list {
   display: flex;
   gap: 10px;

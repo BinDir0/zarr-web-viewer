@@ -76,7 +76,6 @@ if (dashboardNode) {
 }
 
 if (reviewNode) {
-  const REVIEW_FRAME_WINDOW = 160;
   const clipId = Number(reviewNode.dataset.clipId);
   const startRank = Math.max(1, Number(reviewNode.dataset.startRank || 1));
   const titleNode = document.getElementById("mpr-title");
@@ -94,8 +93,9 @@ if (reviewNode) {
   const leftNotVisibleButton = document.getElementById("mpr-left-not-visible");
   const rightNotVisibleButton = document.getElementById("mpr-right-not-visible");
   const assignmentSummary = document.getElementById("mpr-assignment-summary");
-  const keyframeList = document.getElementById("mpr-keyframe-list");
   const stripSummary = document.getElementById("mpr-strip-summary");
+  const jumpInput = document.getElementById("mpr-jump-input");
+  const jumpGoButton = document.getElementById("mpr-jump-go");
   const submitButton = document.getElementById("mpr-submit-review");
   const submitMessage = document.getElementById("mpr-submit-message");
 
@@ -351,39 +351,23 @@ if (reviewNode) {
   function renderReviewFrameList() {
     const reviewFrames = getReviewFrames();
     const total = reviewFrames.length;
-    const halfWindow = Math.floor(REVIEW_FRAME_WINDOW / 2);
-    const startIndex = Math.max(0, Math.min(currentReviewFrameIndex - halfWindow, Math.max(0, total - REVIEW_FRAME_WINDOW)));
-    const endIndex = Math.min(total, startIndex + REVIEW_FRAME_WINDOW);
     const confirmedCount = reviewFrames.filter((item) => ensureReviewEntry(item)?.confirmed).length;
-    stripSummary.textContent = `${confirmedCount}/${total} 已确认 · 显示 ${startIndex + 1}-${endIndex}`;
-    keyframeList.innerHTML = "";
-    reviewFrames.slice(startIndex, endIndex).forEach((reviewFrame, offset) => {
-      const index = startIndex + offset;
-      const review = ensureReviewEntry(reviewFrame);
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "mpr-keyframe-chip";
-      button.classList.add(review?.confirmed ? "is-confirmed" : "is-pending");
-      if (index === currentReviewFrameIndex) button.classList.add("is-current");
-      const reasonText = (reviewFrame.reasons || []).join(" · ") || "普通覆盖";
-      const chipKind = reviewFrame.kind === "recovery" ? "recovery" : reviewFrame.kind === "anchor" ? "anchor" : "coverage";
-      button.innerHTML = `
-        <div class="mpr-chip-topline">
-          <span>frame ${reviewFrame.frame_idx}</span>
-          <span class="mpr-chip-kind">${chipKind}</span>
-        </div>
-        <div class="mpr-chip-reasons">${reasonText}</div>
-        <div class="mpr-chip-state">${frameRoleSummary(review)}</div>
-      `;
-      button.onclick = () => {
-        selectReviewFrame(index);
-      };
-      keyframeList.appendChild(button);
-    });
-    const currentChip = keyframeList.querySelector(".mpr-keyframe-chip.is-current");
-    if (currentChip) {
-      currentChip.scrollIntoView({ block: "nearest", inline: "center" });
+    stripSummary.textContent = `${confirmedCount}/${total} 已确认`;
+    if (jumpInput) {
+      jumpInput.min = total > 0 ? "1" : "0";
+      jumpInput.max = String(Math.max(total, 1));
+      jumpInput.value = total > 0 ? String(currentReviewFrameIndex + 1) : "0";
     }
+  }
+
+  function jumpToReviewFrame(rawValue) {
+    const reviewFrames = getReviewFrames();
+    if (!reviewFrames.length) return;
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed)) return;
+    const index = Math.trunc(parsed) - 1;
+    if (index < 0 || index >= reviewFrames.length) return;
+    selectReviewFrame(index);
   }
 
   function drawOverlay() {
@@ -526,6 +510,16 @@ if (reviewNode) {
   rightMissingButton.onclick = () => toggleUnrecoverable("right");
   leftNotVisibleButton.onclick = () => setSideNotVisible("left");
   rightNotVisibleButton.onclick = () => setSideNotVisible("right");
+  if (jumpGoButton) {
+    jumpGoButton.onclick = () => jumpToReviewFrame(jumpInput?.value);
+  }
+  if (jumpInput) {
+    jumpInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      jumpToReviewFrame(jumpInput.value);
+    });
+  }
   prevKeyframeButton.onclick = () => {
     selectReviewFrame(currentReviewFrameIndex - 1);
   };

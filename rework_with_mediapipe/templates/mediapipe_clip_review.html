@@ -65,12 +65,17 @@
           </section>
         </section>
 
-        <section class="mpr-card">
+        <section class="mpr-card mpr-nav-card">
           <div class="mpr-strip-head">
-            <h2>审核帧</h2>
+            <h2>导航</h2>
             <div id="mpr-strip-summary" class="mpr-meta-note"></div>
           </div>
-          <div id="mpr-keyframe-list" class="mpr-keyframe-list"></div>
+          <div class="mpr-jump-row">
+            <label class="mpr-jump-label" for="mpr-jump-input">跳到审核帧</label>
+            <input id="mpr-jump-input" class="mpr-rank-input mpr-jump-input" type="number" min="1" step="1" value="1">
+            <button id="mpr-jump-go" class="mpr-btn mpr-btn-secondary" type="button">跳转</button>
+          </div>
+          <div class="mpr-meta-note">这里只按审核帧序号跳转，不按原始 frame 号跳。</div>
         </section>
       </main>
     </div>
