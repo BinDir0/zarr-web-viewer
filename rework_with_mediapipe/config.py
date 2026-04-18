@@ -285,22 +285,6 @@ class MediaPipeReviewConfig:
         return int(self.raw["min_chain_frames"])
 
     @property
-    def short_track_max_frames(self) -> int:
-        return int(self.raw["short_track_max_frames"])
-
-    @property
-    def short_track_split_center_ratio(self) -> float:
-        return float(self.raw["short_track_split_center_ratio"])
-
-    @property
-    def short_track_split_area_ratio_high(self) -> float:
-        return float(self.raw["short_track_split_area_ratio_high"])
-
-    @property
-    def short_track_split_area_ratio_low(self) -> float:
-        return float(self.raw["short_track_split_area_ratio_low"])
-
-    @property
     def top_k_chains(self) -> int:
         return int(self.raw["top_k_chains"])
 
@@ -430,10 +414,6 @@ def load_config(config_path: str | None = None) -> MediaPipeReviewConfig:
         "min_tracking_confidence": 0.10,
         "track_max_gap": 2,
         "min_chain_frames": 2,
-        "short_track_max_frames": 90,
-        "short_track_split_center_ratio": 0.30,
-        "short_track_split_area_ratio_high": 2.40,
-        "short_track_split_area_ratio_low": 0.42,
         "top_k_chains": 4,
         "max_review_tracks": 12,
         "fit_device": "cpu",

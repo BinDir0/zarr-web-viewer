@@ -228,35 +228,16 @@ body.mpr-page {
 .mpr-viewer-shell {
   position: relative;
   width: 100%;
-  height: clamp(360px, 72vh, 860px);
+  min-height: 420px;
   background: #181614;
   border-radius: 18px;
   overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 12px;
-  box-sizing: border-box;
-}
-
-.mpr-viewer-stage {
-  position: relative;
-  display: inline-block;
-  max-width: 100%;
-  max-height: 100%;
 }
 
 #mpr-frame-image,
 #mpr-overlay-canvas {
+  width: 100%;
   display: block;
-}
-
-#mpr-frame-image {
-  max-width: 100%;
-  max-height: calc(clamp(360px, 72vh, 860px) - 24px);
-  width: auto;
-  height: auto;
-  object-fit: contain;
 }
 
 #mpr-overlay-canvas {

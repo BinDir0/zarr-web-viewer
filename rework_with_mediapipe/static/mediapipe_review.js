@@ -103,6 +103,7 @@ if (reviewNode) {
   let currentReviewFrameIndex = 0;
   let drawnBoxes = [];
   let cachedReviewFrames = null;
+  const imagePreloadCache = new Map();
 
   const frameTracksByFrameIdx = new Map();
   const frameMetaByFrameIdx = new Map();
@@ -245,10 +246,37 @@ if (reviewNode) {
     return getReviewFrames().every((frame) => ensureReviewEntry(frame)?.confirmed);
   }
 
+  function frameAssetUrl(frame) {
+    return `/mediapipe/assets/${frame.relpath}`;
+  }
+
+  function ensureImagePreloaded(frame) {
+    if (!frame?.relpath) return null;
+    const src = frameAssetUrl(frame);
+    let img = imagePreloadCache.get(src);
+    if (img) return img;
+    img = new Image();
+    img.decoding = "async";
+    img.src = src;
+    imagePreloadCache.set(src, img);
+    return img;
+  }
+
+  function warmImageWindow(centerIndex, radius = 3) {
+    const reviewFrames = getReviewFrames();
+    const start = Math.max(0, centerIndex - radius);
+    const end = Math.min(reviewFrames.length - 1, centerIndex + radius);
+    for (let index = start; index <= end; index += 1) {
+      ensureImagePreloaded(reviewFrames[index]);
+    }
+  }
+
   function renderCurrentFrameImage() {
     const frame = getCurrentFrame();
     if (!frame) return;
-    const src = `/mediapipe/assets/${frame.relpath}`;
+    const src = frameAssetUrl(frame);
+    ensureImagePreloaded(frame);
+    warmImageWindow(currentReviewFrameIndex);
     if (frameImage.dataset.src === src && frameImage.complete) {
       drawOverlay();
       return;
@@ -268,6 +296,7 @@ if (reviewNode) {
       markReviewConfirmed(currentFrame);
     }
     currentReviewFrameIndex = Math.max(0, Math.min(index, reviewFrames.length - 1));
+    warmImageWindow(currentReviewFrameIndex);
     renderCurrentFrameImage();
     renderReviewState();
   }
