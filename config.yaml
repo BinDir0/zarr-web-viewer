@@ -36,12 +36,13 @@ mediapipe_review:
   prefer_installed_ultralytics: false
   ultralytics_repo_root: /share_data/guantianrui/ultralytics
   yolo_model_path: /share_data/guantianrui/HaWoR/weights/external/detector.pt
-  yolo_tracker_config: bytetrack.yaml
+  yolo_tracker_config: botsort.yaml
   yolo_device: ""
   yolo_confidence: 0.05
   yolo_iou: 0.60
   yolo_max_det: 6
   yolo_imgsz: 1280
+  yolo_predict_batch_size: 32
   hand_landmarker_task: /share_data/guantianrui/mediapipe/hand_landmarker.task
   mediapipe_repo_root: /share_data/guantianrui/mediapipe
   manopth_root: /share_data/guantianrui/manopth

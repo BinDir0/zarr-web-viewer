@@ -2,7 +2,7 @@
 
 当前这套 `rework_with_mediapipe` 已改成：
 
-- `preprocess` 用 Ultralytics YOLO + ByteTrack 产出候选框和 track
+- `preprocess` 用 Ultralytics YOLO + BoT-SORT/ByteTrack 产出候选框和 track
 - 网页只做关键帧左手/右手指派，或标记 `可见但缺框`
 - `fit` 不再做 MANO，只做纯框聚合与导出
 
@@ -14,7 +14,7 @@
 - `yolo_model_path`: 你的手框模型权重 `.pt`
 - `yolo_device`: 例如 `0` / `cuda:0` / 留空
 
-当前默认 tracker 是 `bytetrack.yaml`。
+当前默认 tracker 是 `botsort.yaml`，如需回退仍可改回 `bytetrack.yaml`。
 
 一个可直接用的示例是：
 
@@ -22,7 +22,9 @@
 mediapipe_review:
   ultralytics_repo_root: /share_data/guantianrui/ultralytics
   yolo_model_path: /share_data/guantianrui/HaWoR/weights/external/detector.pt
+  yolo_tracker_config: botsort.yaml
   yolo_imgsz: 640
+  yolo_predict_batch_size: 32
   yolo_device: "0"
 ```
 
@@ -43,6 +45,11 @@ python3 -m rework_with_mediapipe.jobs.run_preprocess --process --limit 20
 - `bundle.json`
 - `proposals.npz`
 - `frames/*.jpg`
+
+注意：
+
+- `frames/*.jpg` 只会保存审核真正会用到的关键帧和恢复帧，不再把整条 episode 的预览图全部落盘
+- `bundle.json` 的 `timing` 字段会记录 decode / infer / track / artifact write 分段耗时
 
 ## 3. 启动网页
 
@@ -86,4 +93,4 @@ python3 -m rework_with_mediapipe.jobs.run_fit --export
   - 说明还没在配置里填权重路径。
 
 - `YOLO tracking 没有返回 track id`
-  - 说明当前检测/跟踪配置没正常产出 ByteTrack id，需要检查权重或 tracker。
+  - 说明当前检测/跟踪配置没正常产出 tracker id，需要检查权重或 tracker。

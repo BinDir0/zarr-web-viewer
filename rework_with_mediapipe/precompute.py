@@ -6,6 +6,7 @@ import importlib.metadata
 import json
 import math
 import sys
+import time
 from contextlib import contextmanager
 from collections import defaultdict
 from pathlib import Path
@@ -49,8 +50,12 @@ def _import_ultralytics_runtime():
         from ultralytics import YOLO  # type: ignore
         from ultralytics.engine.results import Boxes  # type: ignore
         from ultralytics.trackers.byte_tracker import BYTETracker  # type: ignore
+        try:
+            from ultralytics.trackers.bot_sort import BOTSORT  # type: ignore
+        except Exception:  # pragma: no cover - older ultralytics builds may miss BoT-SORT
+            BOTSORT = None
 
-    return YOLO, Boxes, BYTETracker
+    return YOLO, Boxes, BYTETracker, BOTSORT
 
 
 def _ensure_ultralytics_runtime(cfg: MediaPipeReviewConfig):
@@ -99,7 +104,7 @@ def _resolve_tracker_config_path(cfg: MediaPipeReviewConfig) -> Path:
         if not base.suffix:
             candidates.append(cfg.ultralytics_repo_root / "ultralytics" / "cfg" / "trackers" / f"{base.name}.yaml")
     else:
-        candidates.append(cfg.ultralytics_repo_root / "ultralytics" / "cfg" / "trackers" / "bytetrack.yaml")
+        candidates.append(cfg.ultralytics_repo_root / "ultralytics" / "cfg" / "trackers" / "botsort.yaml")
 
     for candidate in candidates:
         if candidate.exists():
@@ -110,12 +115,12 @@ def _resolve_tracker_config_path(cfg: MediaPipeReviewConfig) -> Path:
 def _load_tracker_args(cfg: MediaPipeReviewConfig) -> SimpleNamespace:
     tracker_path = _resolve_tracker_config_path(cfg)
     if not tracker_path.exists():
-        raise FileNotFoundError(f"缺少 ByteTrack 配置文件: {tracker_path}")
+        raise FileNotFoundError(f"缺少 YOLO tracker 配置文件: {tracker_path}")
     with tracker_path.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     if not isinstance(raw, dict):
-        raise RuntimeError(f"ByteTrack 配置格式不合法: {tracker_path}")
-    raw.setdefault("tracker_type", "bytetrack")
+        raise RuntimeError(f"YOLO tracker 配置格式不合法: {tracker_path}")
+    raw.setdefault("tracker_type", "botsort")
     return SimpleNamespace(**raw)
 
 
@@ -144,6 +149,14 @@ def _resize_for_review(image: Image.Image, preview_width: int) -> Image.Image:
     return image.resize((preview_width, int(height * scale)), Image.Resampling.BILINEAR)
 
 
+def _preview_size(orig_size: Tuple[int, int], preview_width: int) -> Tuple[int, int]:
+    width, height = int(orig_size[0]), int(orig_size[1])
+    if width <= preview_width:
+        return width, height
+    scale = preview_width / float(width)
+    return preview_width, int(height * scale)
+
+
 def _save_review_frame(image: Image.Image, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path, format="JPEG", quality=80)
@@ -151,19 +164,35 @@ def _save_review_frame(image: Image.Image, output_path: Path) -> None:
 
 class UltralyticsProposalDetector:
     def __init__(self, cfg: MediaPipeReviewConfig):
-        YOLO, Boxes, BYTETracker = _ensure_ultralytics_runtime(cfg)
+        YOLO, Boxes, BYTETracker, BOTSORT = _ensure_ultralytics_runtime(cfg)
         if not str(cfg.raw.get("yolo_model_path", "") or "").strip():
             raise FileNotFoundError("缺少 yolo_model_path 配置，无法运行 YOLO 预处理。")
         if not cfg.yolo_model_path.exists():
             raise FileNotFoundError(f"缺少 YOLO 权重文件: {cfg.yolo_model_path}")
         self._cfg = cfg
         self._Boxes = Boxes
-        self._BYTETracker = BYTETracker
         self._model = YOLO(str(cfg.yolo_model_path))
         self._tracker_args = _load_tracker_args(cfg)
+        self._tracker_type = str(getattr(self._tracker_args, "tracker_type", "botsort")).strip().lower()
+        tracker_classes: Dict[str, Any] = {
+            "bytetrack": BYTETracker,
+        }
+        if BOTSORT is not None:
+            tracker_classes["botsort"] = BOTSORT
+        tracker_cls = tracker_classes.get(self._tracker_type)
+        if tracker_cls is None:
+            supported = ", ".join(sorted(tracker_classes.keys()))
+            raise RuntimeError(f"不支持的 YOLO tracker_type: {self._tracker_type}。当前支持: {supported}")
+        self._track_generation = f"ultralytics_{self._tracker_type}"
+        self._tracker = tracker_cls(args=self._tracker_args, frame_rate=30)
 
     def close(self) -> None:
+        self._tracker = None
         return None
+
+    @property
+    def track_generation(self) -> str:
+        return self._track_generation
 
     def _build_predict_kwargs(self) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
@@ -219,13 +248,15 @@ class UltralyticsProposalDetector:
             return np.zeros((0, 8), dtype=np.float32)
         return np.asarray(current_rows, dtype=np.float32)
 
-    def detect_sequence(self, frames: List[Dict[str, Any]]) -> Dict[int, List[Proposal]]:
+    def detect_batch(self, frames: List[Dict[str, Any]]) -> Tuple[Dict[int, List[Proposal]], Dict[str, float]]:
         if not frames:
-            return {}
+            return {}, {"detector_infer_seconds": 0.0, "tracker_association_seconds": 0.0}
+        infer_start = time.perf_counter()
         results = self._predict_batch(frames)
-        tracker = self._BYTETracker(args=self._tracker_args, frame_rate=30)
+        infer_seconds = time.perf_counter() - infer_start
 
         proposals_by_frame: Dict[int, List[Proposal]] = {}
+        tracking_start = time.perf_counter()
         for frame_item, result in zip(frames, results):
             frame_idx = int(frame_item["frame_idx"])
             preview_width, preview_height = frame_item["preview_size"]
@@ -234,8 +265,8 @@ class UltralyticsProposalDetector:
             scale_y = preview_height / max(float(orig_height), 1.0)
             names = getattr(result, "names", {}) or {}
             det_boxes = self._make_boxes(result, (int(orig_height), int(orig_width)))
-            _ = tracker.update(det_boxes, frame_item["image_np"])
-            track_rows = self._rows_from_tracker_state(tracker)
+            _ = self._tracker.update(det_boxes, frame_item["image_np"])
+            track_rows = self._rows_from_tracker_state(self._tracker)
             if len(track_rows) == 0:
                 proposals_by_frame[frame_idx] = []
                 continue
@@ -261,7 +292,11 @@ class UltralyticsProposalDetector:
                     )
                 )
             proposals_by_frame[frame_idx] = frame_proposals
-        return proposals_by_frame
+        tracking_seconds = time.perf_counter() - tracking_start
+        return proposals_by_frame, {
+            "detector_infer_seconds": float(infer_seconds),
+            "tracker_association_seconds": float(tracking_seconds),
+        }
 
 
 def _build_yolo_tracks(
@@ -595,37 +630,54 @@ def _save_proposals_npz(bundle_dir: Path, per_frame_proposals: Dict[int, List[Pr
 
 
 def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> Dict:
+    total_start = time.perf_counter()
     frame_source = make_frame_source(clip.episode)
     bundle_dir = cfg.bundles_dir / f"clip_{clip_id:06d}"
     frames_dir = bundle_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     frames_relpaths: Dict[int, str] = {}
     frame_sizes: Dict[int, Dict[str, List[int]]] = {}
+    ordered_frame_indices: List[int] = []
+    per_frame_proposals: Dict[int, List[Proposal]] = {}
     detector_inputs: List[Dict[str, Any]] = []
-
-    for packet in frame_source.iter_frames(clip.clip_start, clip.clip_end):
-        review_image = _resize_for_review(packet.image, cfg.preview_width)
-        relpath = f"bundles/clip_{clip_id:06d}/frames/{packet.frame_idx:06d}.jpg"
-        _save_review_frame(review_image, frames_dir / f"{packet.frame_idx:06d}.jpg")
-        frames_relpaths[packet.frame_idx] = relpath
-        frame_sizes[int(packet.frame_idx)] = {
-            "orig_size": [int(packet.image.size[0]), int(packet.image.size[1])],
-            "preview_size": [int(review_image.size[0]), int(review_image.size[1])],
-        }
-        detector_inputs.append(
-            {
-                "frame_idx": int(packet.frame_idx),
-                "image_np": np.ascontiguousarray(np.asarray(packet.image)),
-                "orig_size": packet.image.size,
-                "preview_size": review_image.size,
-            }
-        )
+    detector_infer_seconds = 0.0
+    tracker_association_seconds = 0.0
+    first_pass_start = time.perf_counter()
 
     detector = UltralyticsProposalDetector(cfg)
     try:
-        per_frame_proposals = detector.detect_sequence(detector_inputs)
+        for packet in frame_source.iter_frames(clip.clip_start, clip.clip_end):
+            orig_size = packet.image.size
+            preview_size = _preview_size(orig_size, cfg.preview_width)
+            detector_inputs.append(
+                {
+                    "frame_idx": int(packet.frame_idx),
+                    "image_np": np.ascontiguousarray(np.asarray(packet.image)),
+                    "orig_size": orig_size,
+                    "preview_size": preview_size,
+                }
+            )
+            ordered_frame_indices.append(int(packet.frame_idx))
+            frame_sizes[int(packet.frame_idx)] = {
+                "orig_size": [int(orig_size[0]), int(orig_size[1])],
+                "preview_size": [int(preview_size[0]), int(preview_size[1])],
+            }
+            if len(detector_inputs) < cfg.yolo_predict_batch_size:
+                continue
+            batch_proposals, batch_timing = detector.detect_batch(detector_inputs)
+            per_frame_proposals.update(batch_proposals)
+            detector_infer_seconds += float(batch_timing["detector_infer_seconds"])
+            tracker_association_seconds += float(batch_timing["tracker_association_seconds"])
+            detector_inputs = []
+        if detector_inputs:
+            batch_proposals, batch_timing = detector.detect_batch(detector_inputs)
+            per_frame_proposals.update(batch_proposals)
+            detector_infer_seconds += float(batch_timing["detector_infer_seconds"])
+            tracker_association_seconds += float(batch_timing["tracker_association_seconds"])
     finally:
         detector.close()
+    first_pass_seconds = time.perf_counter() - first_pass_start
+    decode_seconds = max(0.0, first_pass_seconds - detector_infer_seconds - tracker_association_seconds)
 
     tracks = _build_yolo_tracks(
         per_frame_proposals,
@@ -635,11 +687,10 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
     visible_tracks = list(tracks)
     too_dense_for_review = len(visible_tracks) > cfg.max_review_tracks
 
-    proposals_npz_path = _save_proposals_npz(bundle_dir, per_frame_proposals)
     bad_frame_lookup = {int(frame_idx) for frame_idx in clip.bad_frames}
-    ordered_frame_indices = sorted(frames_relpaths.keys())
     frame_tracks, visible_track_ids = _build_frame_tracks(ordered_frame_indices, visible_tracks)
-    image_size = detector_inputs[0]["preview_size"] if detector_inputs else (0, 0)
+    image_size = tuple(frame_sizes[ordered_frame_indices[0]]["preview_size"]) if ordered_frame_indices else (0, 0)
+    keyframe_build_start = time.perf_counter()
     motion_scores, motion_reasons = _compute_motion_scores(visible_tracks, ordered_frame_indices, image_size, cfg)
     segments, keyframes, frame_to_segment = _build_segments_and_keyframes(
         clip=clip,
@@ -651,10 +702,36 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
         motion_reasons=motion_reasons,
         cfg=cfg,
     )
+    keyframe_build_seconds = time.perf_counter() - keyframe_build_start
     for item in frame_tracks:
         item["segment_id"] = int(frame_to_segment.get(int(item["frame_idx"]), -1))
+
+    review_frame_indices = {
+        int(item["frame_idx"])
+        for item in keyframes
+    }
+    for segment in segments:
+        review_frame_indices.update(int(frame_idx) for frame_idx in segment.get("recovery_candidate_frames", []))
+
+    artifact_write_start = time.perf_counter()
+    for packet in frame_source.iter_frame_indices(sorted(review_frame_indices)):
+        review_image = _resize_for_review(packet.image, cfg.preview_width)
+        relpath = f"bundles/clip_{clip_id:06d}/frames/{packet.frame_idx:06d}.jpg"
+        _save_review_frame(review_image, frames_dir / f"{packet.frame_idx:06d}.jpg")
+        frames_relpaths[int(packet.frame_idx)] = relpath
     for item in keyframes:
         item["relpath"] = frames_relpaths[int(item["frame_idx"])]
+    proposals_npz_path = _save_proposals_npz(bundle_dir, per_frame_proposals)
+    artifact_write_seconds = time.perf_counter() - artifact_write_start
+
+    timing = {
+        "frame_decode_seconds": float(decode_seconds),
+        "detector_infer_seconds": float(detector_infer_seconds),
+        "tracker_association_seconds": float(tracker_association_seconds),
+        "keyframe_build_seconds": float(keyframe_build_seconds),
+        "artifact_write_seconds": float(artifact_write_seconds),
+        "total_seconds": float(time.perf_counter() - total_start),
+    }
 
     bundle = {
         "clip_id": clip_id,
@@ -667,13 +744,14 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
         "dirty_reason": clip.dirty_reason,
         "bad_frame_indices": sorted(bad_frame_lookup),
         "too_dense_for_review": too_dense_for_review,
-        "track_generation": "ultralytics_bytetrack",
+        "track_generation": detector.track_generation,
         "detector_model_path": str(cfg.yolo_model_path),
         "proposals_npz_relpath": str(proposals_npz_path.relative_to(cfg.artifacts_dir)),
+        "timing": timing,
         "frames": [
             {
                 "frame_idx": frame_idx,
-                "relpath": frames_relpaths[frame_idx],
+                "relpath": frames_relpaths.get(frame_idx),
                 "is_bad": frame_idx in bad_frame_lookup,
                 "segment_id": int(frame_to_segment.get(frame_idx, -1)),
                 "visible_track_ids": sorted(visible_track_ids.get(frame_idx, set())),

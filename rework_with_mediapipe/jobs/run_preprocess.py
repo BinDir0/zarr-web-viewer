@@ -72,7 +72,17 @@ def main() -> None:
                     )
                     update_clip_status(conn, clip_id, status=next_status, bundle_relpath=result["bundle_relpath"])
                     processed += 1
-                    print(f"[preprocess] episode={clip_id} status={next_status}")
+                    timing = dict(result["bundle"].get("timing", {}))
+                    print(
+                        "[preprocess] "
+                        f"episode={clip_id} status={next_status} "
+                        f"tracker={result['bundle'].get('track_generation', '')} "
+                        f"total={timing.get('total_seconds', 0.0):.2f}s "
+                        f"decode={timing.get('frame_decode_seconds', 0.0):.2f}s "
+                        f"infer={timing.get('detector_infer_seconds', 0.0):.2f}s "
+                        f"track={timing.get('tracker_association_seconds', 0.0):.2f}s "
+                        f"artifacts={timing.get('artifact_write_seconds', 0.0):.2f}s"
+                    )
                 except Exception as exc:
                     traceback.print_exc()
                     update_clip_status(conn, clip_id, status="failed", error_message=str(exc))

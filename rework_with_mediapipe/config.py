@@ -197,6 +197,10 @@ class MediaPipeReviewConfig:
         return int(self.raw["yolo_imgsz"])
 
     @property
+    def yolo_predict_batch_size(self) -> int:
+        return max(1, int(self.raw.get("yolo_predict_batch_size", 32)))
+
+    @property
     def manopth_root(self) -> Path:
         return Path(str(self.raw["manopth_root"]))
 
@@ -382,12 +386,13 @@ def load_config(config_path: str | None = None) -> MediaPipeReviewConfig:
         "mediapipe_repo_root": _default_mediapipe_repo_root(),
         "ultralytics_repo_root": _default_ultralytics_repo_root(),
         "yolo_model_path": _default_yolo_model_path(),
-        "yolo_tracker_config": "bytetrack.yaml",
+        "yolo_tracker_config": "botsort.yaml",
         "yolo_device": "",
         "yolo_confidence": 0.05,
         "yolo_iou": 0.60,
         "yolo_max_det": 6,
         "yolo_imgsz": 1280,
+        "yolo_predict_batch_size": 32,
         "manopth_root": _default_manopth_root(),
         "mano_models_root": _default_mano_models_root(),
         "clip_context_frames": 60,
