@@ -7,7 +7,7 @@ import traceback
 from ..config import load_config
 from ..db import open_db, update_clip_status, upsert_clip
 from ..discover import discover_dirty_clips
-from ..precompute import preprocess_clip
+from ..precompute import PreprocessRuntime, preprocess_clip
 from ..types import ClipRef, EpisodeRef
 
 
@@ -51,36 +51,40 @@ def main() -> None:
                 """,
                 (cfg.min_export_episode_frames, args.limit),
             ).fetchall()
-            for row in rows:
-                payload = json.loads(row["source_json"])
-                clip = ClipRef(
-                    episode=EpisodeRef(**payload["episode"]),
-                    clip_start=int(payload["clip_start"]),
-                    clip_end=int(payload["clip_end"]),
-                    dirty_reason=str(payload["dirty_reason"]),
-                    bad_frames=list(payload.get("bad_frames", [])),
-                )
-                clip_id = int(row["id"])
-                update_clip_status(conn, clip_id, status="preprocessing")
-                try:
-                    result = preprocess_clip(clip, clip_id, cfg)
-                    next_status = "ready_for_review"
-                    update_clip_status(conn, clip_id, status=next_status, bundle_relpath=result["bundle_relpath"])
-                    processed += 1
-                    timing = dict(result["bundle"].get("timing", {}))
-                    print(
-                        "[preprocess] "
-                        f"episode={clip_id} status={next_status} "
-                        f"total={timing.get('total_seconds', 0.0):.2f}s "
-                        f"primary={timing.get('primary_infer_seconds', 0.0):.2f}s "
-                        f"fallback={timing.get('fallback_infer_seconds', 0.0):.2f}s "
-                        f"keyframes={timing.get('keyframe_build_seconds', 0.0):.2f}s "
-                        f"artifacts={timing.get('artifact_write_seconds', 0.0):.2f}s"
+            runtime = PreprocessRuntime(cfg)
+            try:
+                for row in rows:
+                    payload = json.loads(row["source_json"])
+                    clip = ClipRef(
+                        episode=EpisodeRef(**payload["episode"]),
+                        clip_start=int(payload["clip_start"]),
+                        clip_end=int(payload["clip_end"]),
+                        dirty_reason=str(payload["dirty_reason"]),
+                        bad_frames=list(payload.get("bad_frames", [])),
                     )
-                except Exception as exc:
-                    traceback.print_exc()
-                    update_clip_status(conn, clip_id, status="failed", error_message=str(exc))
-                    print(f"[preprocess] episode={clip_id} failed: {exc}")
+                    clip_id = int(row["id"])
+                    update_clip_status(conn, clip_id, status="preprocessing")
+                    try:
+                        result = preprocess_clip(clip, clip_id, cfg, runtime=runtime)
+                        next_status = "ready_for_review"
+                        update_clip_status(conn, clip_id, status=next_status, bundle_relpath=result["bundle_relpath"])
+                        processed += 1
+                        timing = dict(result["bundle"].get("timing", {}))
+                        print(
+                            "[preprocess] "
+                            f"episode={clip_id} status={next_status} "
+                            f"total={timing.get('total_seconds', 0.0):.2f}s "
+                            f"primary={timing.get('primary_infer_seconds', 0.0):.2f}s "
+                            f"fallback={timing.get('fallback_infer_seconds', 0.0):.2f}s "
+                            f"keyframes={timing.get('keyframe_build_seconds', 0.0):.2f}s "
+                            f"artifacts={timing.get('artifact_write_seconds', 0.0):.2f}s"
+                        )
+                    except Exception as exc:
+                        traceback.print_exc()
+                        update_clip_status(conn, clip_id, status="failed", error_message=str(exc))
+                        print(f"[preprocess] episode={clip_id} failed: {exc}")
+            finally:
+                runtime.close()
     print(json.dumps({"discovered": discovered, "processed": processed}, ensure_ascii=False))
 
 

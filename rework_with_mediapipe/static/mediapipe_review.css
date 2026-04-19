@@ -304,6 +304,11 @@ body.mpr-page {
   margin: 0;
 }
 
+.mpr-nav-card {
+  display: grid;
+  gap: 10px;
+}
+
 .mpr-jump-row {
   display: flex;
   flex-wrap: wrap;

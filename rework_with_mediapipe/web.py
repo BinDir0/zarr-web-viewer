@@ -10,8 +10,8 @@ from .config import MediaPipeReviewConfig, load_config
 from .db import (
     count_clips_by_status,
     get_clip,
+    get_clip_by_status_offset,
     get_next_clip_by_status_after_id,
-    get_preprocessed_clip_by_offset,
     list_clips_by_statuses,
     list_fit_jobs,
     open_db,
@@ -68,12 +68,12 @@ def _dependency_status(cfg: MediaPipeReviewConfig) -> Dict[str, Any]:
 
 
 def _summary_payload(cfg: MediaPipeReviewConfig, *, start_rank: int = 1) -> Dict[str, Any]:
-    queue_offset = max(0, int(start_rank) - 1)
     with open_db(cfg.db_path) as conn:
         counts = count_clips_by_status(conn, min_num_frames=cfg.min_export_episode_frames)
-        start_clip = get_preprocessed_clip_by_offset(
+        start_clip = get_clip_by_status_offset(
             conn,
-            offset=queue_offset,
+            "ready_for_review",
+            offset=max(0, int(start_rank) - 1),
             min_num_frames=cfg.min_export_episode_frames,
         )
         reviewed = list_clips_by_statuses(
@@ -249,7 +249,7 @@ def clip_page(clip_id: int):
 @mediapipe_review_bp.get("/mediapipe/assets/<path:relpath>")
 def asset(relpath: str):
     cfg = init_runtime()
-    return send_from_directory(str(cfg.artifacts_dir), relpath)
+    return send_from_directory(str(cfg.artifacts_dir), relpath, max_age=86400)
 
 
 @mediapipe_review_bp.get("/api/mediapipe/summary")
@@ -263,7 +263,6 @@ def api_summary():
 def api_next_clip():
     cfg = init_runtime()
     start_rank = _parse_start_rank(request.args.get("start_rank", 1))
-    queue_offset = max(0, start_rank - 1)
     after_clip_id = request.args.get("after_clip_id", default=None, type=int)
     with open_db(cfg.db_path) as conn:
         if after_clip_id is not None:
@@ -274,9 +273,10 @@ def api_next_clip():
                 min_num_frames=cfg.min_export_episode_frames,
             )
         else:
-            row = get_preprocessed_clip_by_offset(
+            row = get_clip_by_status_offset(
                 conn,
-                offset=queue_offset,
+                "ready_for_review",
+                offset=max(0, start_rank - 1),
                 min_num_frames=cfg.min_export_episode_frames,
             )
     return jsonify(
@@ -294,13 +294,13 @@ def api_clip(clip_id: int):
     with open_db(cfg.db_path) as conn:
         clip = get_clip(conn, clip_id)
     if clip is None:
-        abort(404)
+        return jsonify({"success": False, "message": f"Unknown clip_id: {clip_id}"}), 404
     if not clip.get("bundle_relpath"):
         return jsonify({"success": True, "clip": clip, "bundle": None})
-    bundle = _load_bundle(cfg, clip["bundle_relpath"])
     try:
+        bundle = _load_bundle(cfg, clip["bundle_relpath"])
         compact_bundle = _compact_bundle_for_review(bundle)
-    except ValueError as exc:
+    except Exception as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
     return jsonify({"success": True, "clip": clip, "bundle": compact_bundle})
 
@@ -312,13 +312,13 @@ def api_submit_review(clip_id: int):
     with open_db(cfg.db_path) as conn:
         clip = get_clip(conn, clip_id)
         if clip is None:
-            abort(404)
+            return jsonify({"success": False, "message": f"Unknown clip_id: {clip_id}"}), 404
         if not clip.get("bundle_relpath"):
             return jsonify({"success": False, "message": "episode bundle is missing"}), 400
-        bundle = _load_bundle(cfg, clip["bundle_relpath"])
         try:
+            bundle = _load_bundle(cfg, clip["bundle_relpath"])
             review_payload = _normalize_frame_review_payload_v3(payload, bundle)
-        except ValueError as exc:
+        except Exception as exc:
             return jsonify({"success": False, "message": str(exc)}), 400
         save_vendor_review(
             conn,

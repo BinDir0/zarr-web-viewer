@@ -176,6 +176,29 @@ def _local_config_float(cfg: MediaPipeReviewConfig, key: str, default: float) ->
         return float(default)
 
 
+class PreprocessRuntime:
+    def __init__(self, cfg: MediaPipeReviewConfig):
+        self._cfg = cfg
+        self._primary_detector: UltralyticsFrameProposalDetector | None = None
+        self._fallback_detector: MediaPipeImageProposalDetector | None = None
+
+    def primary_detector(self) -> "UltralyticsFrameProposalDetector":
+        if self._primary_detector is None:
+            self._primary_detector = UltralyticsFrameProposalDetector(self._cfg)
+        return self._primary_detector
+
+    def fallback_detector(self) -> "MediaPipeImageProposalDetector":
+        if self._fallback_detector is None:
+            self._fallback_detector = MediaPipeImageProposalDetector(self._cfg)
+        return self._fallback_detector
+
+    def close(self) -> None:
+        if self._fallback_detector is not None:
+            self._fallback_detector.close()
+            self._fallback_detector = None
+        self._primary_detector = None
+
+
 class UltralyticsFrameProposalDetector:
     def __init__(self, cfg: MediaPipeReviewConfig):
         YOLO = _ensure_ultralytics_runtime(cfg)
@@ -605,7 +628,12 @@ def _save_proposals_npz(bundle_dir: Path, frame_proposals: Dict[int, List[Propos
     return npz_path
 
 
-def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> Dict[str, Any]:
+def preprocess_clip(
+    clip: ClipRef,
+    clip_id: int,
+    cfg: MediaPipeReviewConfig,
+    runtime: PreprocessRuntime | None = None,
+) -> Dict[str, Any]:
     total_start = time.perf_counter()
     frame_source = make_frame_source(clip.episode)
     bundle_dir = cfg.bundles_dir / f"clip_{clip_id:06d}"
@@ -618,7 +646,7 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
     primary_raw_by_frame: Dict[int, List[Dict[str, Any]]] = {}
     primary_infer_seconds = 0.0
 
-    primary_detector = UltralyticsFrameProposalDetector(cfg)
+    primary_detector = runtime.primary_detector() if runtime is not None else UltralyticsFrameProposalDetector(cfg)
     primary_start = time.perf_counter()
     for packet in frame_source.iter_frames(clip.clip_start, clip.clip_end):
         orig_size = packet.image.size
@@ -652,23 +680,22 @@ def preprocess_clip(clip: ClipRef, clip_id: int, cfg: MediaPipeReviewConfig) -> 
     fallback_raw_by_frame: Dict[int, List[Dict[str, Any]]] = {}
     fallback_infer_seconds = 0.0
     if fallback_frames:
-        fallback_detector = MediaPipeImageProposalDetector(cfg)
-        try:
-            fallback_inputs: List[Dict[str, Any]] = []
-            for packet in frame_source.iter_frame_indices(fallback_frames):
-                sizes = frame_sizes[int(packet.frame_idx)]
-                fallback_inputs.append(
-                    {
-                        "frame_idx": int(packet.frame_idx),
-                        "image_np": np.ascontiguousarray(np.asarray(packet.image)),
-                        "orig_size": (int(sizes["orig_size"][0]), int(sizes["orig_size"][1])),
-                        "preview_size": (int(sizes["preview_size"][0]), int(sizes["preview_size"][1])),
-                    }
-                )
-            batch_props, timing = fallback_detector.detect_batch(fallback_inputs)
-            fallback_raw_by_frame.update(batch_props)
-            fallback_infer_seconds += float(timing["detector_infer_seconds"])
-        finally:
+        fallback_detector = runtime.fallback_detector() if runtime is not None else MediaPipeImageProposalDetector(cfg)
+        fallback_inputs: List[Dict[str, Any]] = []
+        for packet in frame_source.iter_frame_indices(fallback_frames):
+            sizes = frame_sizes[int(packet.frame_idx)]
+            fallback_inputs.append(
+                {
+                    "frame_idx": int(packet.frame_idx),
+                    "image_np": np.ascontiguousarray(np.asarray(packet.image)),
+                    "orig_size": (int(sizes["orig_size"][0]), int(sizes["orig_size"][1])),
+                    "preview_size": (int(sizes["preview_size"][0]), int(sizes["preview_size"][1])),
+                }
+            )
+        batch_props, timing = fallback_detector.detect_batch(fallback_inputs)
+        fallback_raw_by_frame.update(batch_props)
+        fallback_infer_seconds += float(timing["detector_infer_seconds"])
+        if runtime is None:
             fallback_detector.close()
 
     merge_start = time.perf_counter()

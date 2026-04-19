@@ -7,7 +7,7 @@ function renderSummary(summary) {
   const startEmpty = document.getElementById("mpr-start-empty");
   const startActions = document.getElementById("mpr-start-actions");
   const startRankInput = document.getElementById("mpr-start-rank");
-  const startRank = Math.max(1, Number(startRankInput?.value || summary.requested_start_rank || 1));
+  const startRank = Math.max(1, Number(summary.requested_start_rank || startRankInput?.value || 1));
   if (countsNode && summary.counts) {
     countsNode.innerHTML = Object.entries(summary.counts)
       .map(
@@ -31,16 +31,17 @@ function renderSummary(summary) {
       if (startLink) startLink.style.display = "none";
       if (startEmpty) startEmpty.style.display = "";
       if (startEmpty) {
-        startEmpty.textContent = `从第 ${startRank} 条开始时，当前没有已预处理 episode`;
+        startEmpty.textContent = `从第 ${startRank} 条开始时，当前没有可审核 episode`;
       }
     }
   }
 }
 
-async function fetchSummary(startRank = 1) {
+async function fetchSummary(startRank = 1, requestSeq = null) {
   const rank = Math.max(1, Number(startRank || 1));
   const response = await fetch(`/api/mediapipe/summary?start_rank=${encodeURIComponent(rank)}`);
   const data = await response.json();
+  if (requestSeq !== null && requestSeq !== fetchSummary.latestRequestSeq) return;
   if (response.ok && data.success) {
     renderSummary(data);
   }
@@ -48,6 +49,7 @@ async function fetchSummary(startRank = 1) {
 
 if (dashboardNode) {
   const startRankInput = document.getElementById("mpr-start-rank");
+  fetchSummary.latestRequestSeq = 0;
   const refreshSummary = () => {
     const startRank = Math.max(1, Number(startRankInput?.value || 1));
     if (startRankInput) {
@@ -56,7 +58,8 @@ if (dashboardNode) {
     const nextUrl = new URL(window.location.href);
     nextUrl.searchParams.set("start_rank", String(startRank));
     window.history.replaceState({}, "", nextUrl);
-    return fetchSummary(startRank);
+    fetchSummary.latestRequestSeq += 1;
+    return fetchSummary(startRank, fetchSummary.latestRequestSeq);
   };
   if (startRankInput) {
     startRankInput.addEventListener("input", () => {
@@ -70,8 +73,8 @@ if (dashboardNode) {
 }
 
 if (reviewNode) {
-  const clipId = Number(reviewNode.dataset.clipId);
-  const startRank = Math.max(1, Number(reviewNode.dataset.startRank || 1));
+  let currentClipId = Number(reviewNode.dataset.clipId);
+  let currentStartRank = Math.max(1, Number(reviewNode.dataset.startRank || 1));
   const titleNode = document.getElementById("mpr-title");
   const subtitleNode = document.getElementById("mpr-subtitle");
   const frameImage = document.getElementById("mpr-frame-image");
@@ -91,6 +94,9 @@ if (reviewNode) {
   const drawStatus = document.getElementById("mpr-draw-status");
   const assignmentSummary = document.getElementById("mpr-assignment-summary");
   const stripSummary = document.getElementById("mpr-strip-summary");
+  const episodeRankInput = document.getElementById("mpr-episode-rank-input");
+  const episodeRankGoButton = document.getElementById("mpr-episode-rank-go");
+  const episodeJumpStatus = document.getElementById("mpr-episode-jump-status");
   const jumpInput = document.getElementById("mpr-jump-input");
   const jumpGoButton = document.getElementById("mpr-jump-go");
   const submitButton = document.getElementById("mpr-submit-review");
@@ -106,6 +112,38 @@ if (reviewNode) {
   const frameProposalsByFrameIdx = new Map();
   const frameReviewByFrame = new Map();
   const imagePreloadCache = new Map();
+  const clipDataCache = new Map();
+  let loadSequence = 0;
+
+  async function parseJsonResponse(response) {
+    const rawText = await response.text();
+    try {
+      return JSON.parse(rawText);
+    } catch (error) {
+      const compact = String(rawText || "").trim().slice(0, 300);
+      throw new Error(compact || `HTTP ${response.status}`);
+    }
+  }
+
+  function fetchClipData(targetClipId) {
+    const normalizedClipId = Number(targetClipId);
+    if (!clipDataCache.has(normalizedClipId)) {
+      const promise = fetch(`/api/mediapipe/clips/${normalizedClipId}`)
+        .then(async (response) => {
+          const data = await parseJsonResponse(response);
+          if (!response.ok || !data.success) {
+            throw new Error(data.message || `加载 episode ${normalizedClipId} 失败`);
+          }
+          return data;
+        })
+        .catch((error) => {
+          clipDataCache.delete(normalizedClipId);
+          throw error;
+        });
+      clipDataCache.set(normalizedClipId, promise);
+    }
+    return clipDataCache.get(normalizedClipId);
+  }
 
   function getReviewFrames() {
     return bundle?.review_frames || [];
@@ -156,16 +194,29 @@ if (reviewNode) {
   function ensureImagePreloaded(frame) {
     if (!frame?.relpath) return null;
     const src = frameAssetUrl(frame);
-    let img = imagePreloadCache.get(src);
-    if (img) return img;
-    img = new Image();
+    let cached = imagePreloadCache.get(src);
+    if (cached) return cached;
+    const img = new Image();
     img.decoding = "async";
+    img.loading = "eager";
+    const promise = new Promise((resolve, reject) => {
+      img.onload = async () => {
+        try {
+          if (img.decode) await img.decode();
+        } catch (error) {
+          // Some browsers reject decode() for already-decoded cached images.
+        }
+        resolve(img);
+      };
+      img.onerror = reject;
+    });
+    cached = { img, promise };
+    imagePreloadCache.set(src, cached);
     img.src = src;
-    imagePreloadCache.set(src, img);
-    return img;
+    return cached;
   }
 
-  function warmImageWindow(centerIndex, radius = 2) {
+  function warmImageWindow(centerIndex, radius = 6) {
     const reviewFrames = getReviewFrames();
     const start = Math.max(0, centerIndex - radius);
     const end = Math.min(reviewFrames.length - 1, centerIndex + radius);
@@ -174,18 +225,46 @@ if (reviewNode) {
     }
   }
 
+  function warmReviewImagesProgressively(reviewFrames) {
+    let index = 0;
+    const tick = () => {
+      const batchEnd = Math.min(reviewFrames.length, index + 4);
+      while (index < batchEnd) {
+        ensureImagePreloaded(reviewFrames[index]);
+        index += 1;
+      }
+      if (index < reviewFrames.length) {
+        window.setTimeout(tick, 80);
+      }
+    };
+    window.setTimeout(tick, 120);
+  }
+
+  function warmBundleImages(compactBundle, maxFrames = 10) {
+    (compactBundle?.review_frames || []).slice(0, maxFrames).forEach((frame) => ensureImagePreloaded(frame));
+  }
+
   function renderCurrentFrameImage() {
     const frame = getCurrentFrame();
     if (!frame) return;
     const src = frameAssetUrl(frame);
-    ensureImagePreloaded(frame);
+    const cached = ensureImagePreloaded(frame);
     warmImageWindow(currentReviewFrameIndex);
     if (frameImage.dataset.src === src && frameImage.complete) {
       drawOverlay();
       return;
     }
     frameImage.dataset.src = src;
-    frameImage.onload = () => drawOverlay();
+    frameImage.onload = () => {
+      if (frameImage.dataset.src === src) drawOverlay();
+    };
+    if (cached?.promise) {
+      cached.promise
+        .then(() => {
+          if (frameImage.dataset.src === src) drawOverlay();
+        })
+        .catch(() => {});
+    }
     frameImage.src = src;
   }
 
@@ -439,18 +518,20 @@ if (reviewNode) {
       submitMessage.textContent = "还有审核帧未确认，不能提交。";
       return;
     }
-    const response = await fetch(`/api/mediapipe/clips/${clipId}/submit-review`, {
+    const response = await fetch(`/api/mediapipe/clips/${currentClipId}/submit-review`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(buildPayload()),
     });
-    const data = await response.json();
+    const data = await parseJsonResponse(response);
     if (!response.ok || !data.success) {
       submitMessage.textContent = data.message || "提交失败";
       return;
     }
     if (data.next_clip_id) {
-      window.location.href = `/mediapipe/clip/${data.next_clip_id}?start_rank=${startRank}`;
+      loadClip(data.next_clip_id, { pushUrl: true, startRankValue: currentStartRank }).catch((error) => {
+        submitMessage.textContent = String(error);
+      });
       return;
     }
     submitMessage.textContent = "提交成功，没有更多 ready episode。";
@@ -482,6 +563,109 @@ if (reviewNode) {
     const index = Math.trunc(parsed) - 1;
     if (index < 0 || index >= reviewFrames.length) return;
     selectReviewFrame(index);
+  }
+
+  function resetClipState() {
+    bundle = null;
+    currentReviewFrameIndex = 0;
+    drawnBoxes = [];
+    activeDrawSide = null;
+    draftBox = null;
+    dragState = null;
+    frameMetaByFrameIdx.clear();
+    frameProposalsByFrameIdx.clear();
+    frameReviewByFrame.clear();
+    submitMessage.textContent = "";
+    assignmentSummary.textContent = "";
+    keyframeLabel.textContent = "";
+    keyframeReasons.textContent = "";
+    keyframeStatus.textContent = "";
+    stripSummary.textContent = "";
+    frameImage.removeAttribute("src");
+    frameImage.dataset.src = "";
+    const ctx = overlayCanvas.getContext("2d");
+    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  }
+
+  async function preloadNextEpisode(afterClipId) {
+    try {
+      const response = await fetch(`/api/mediapipe/clips/next?after_clip_id=${encodeURIComponent(afterClipId)}`);
+      const data = await parseJsonResponse(response);
+      if (!response.ok || !data.success || !data.clip_id || Number(data.clip_id) === Number(currentClipId)) return;
+      const nextData = await fetchClipData(Number(data.clip_id));
+      warmBundleImages(nextData.bundle, 10);
+    } catch (error) {
+      console.debug("next episode preload failed", error);
+    }
+  }
+
+  async function loadClip(targetClipId, options = {}) {
+    const normalizedClipId = Number(targetClipId);
+    const nextStartRank = Math.max(1, Number(options.startRankValue || currentStartRank || 1));
+    const sequence = (loadSequence += 1);
+    titleNode.textContent = `Loading episode ${normalizedClipId}...`;
+    subtitleNode.textContent = "";
+    submitButton.disabled = true;
+    let data;
+    try {
+      data = await fetchClipData(normalizedClipId);
+    } catch (error) {
+      if (sequence === loadSequence) titleNode.textContent = String(error);
+      throw error;
+    }
+    if (sequence !== loadSequence) return;
+
+    currentClipId = normalizedClipId;
+    currentStartRank = nextStartRank;
+    reviewNode.dataset.clipId = String(currentClipId);
+    reviewNode.dataset.startRank = String(currentStartRank);
+    if (episodeRankInput) episodeRankInput.value = String(currentStartRank);
+    if (options.pushUrl) {
+      const nextUrl = `/mediapipe/clip/${currentClipId}?start_rank=${currentStartRank}`;
+      window.history.pushState({ clipId: currentClipId, startRank: currentStartRank }, "", nextUrl);
+    }
+
+    resetClipState();
+    bundle = data.bundle;
+    if (!bundle) {
+      titleNode.textContent = "这个 episode 还没有可用的 bundle。";
+      return;
+    }
+    (bundle.frames || []).forEach((item) => {
+      frameMetaByFrameIdx.set(Number(item.frame_idx), item);
+    });
+    (bundle.frame_proposals || []).forEach((item) => {
+      frameProposalsByFrameIdx.set(Number(item.frame_idx), item);
+    });
+    titleNode.textContent = `${bundle.episode_name} · 全 episode · ${Number(bundle.num_frames || 0)} 帧`;
+    subtitleNode.textContent = `${bundle.dirty_reason} · ${getReviewFrames().length} 个审核帧 · clip ${currentClipId}`;
+    hydrateFromExistingReview(data.clip?.review_payload_json);
+    const firstPending = getReviewFrames().findIndex((frame) => !ensureReviewEntry(frame)?.confirmed);
+    currentReviewFrameIndex = firstPending >= 0 ? firstPending : 0;
+    selectReviewFrame(currentReviewFrameIndex);
+    warmReviewImagesProgressively(getReviewFrames());
+    preloadNextEpisode(currentClipId);
+  }
+
+  async function jumpToEpisodeRank(rawValue) {
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed)) return;
+    const rank = Math.max(1, Math.trunc(parsed));
+    if (episodeRankInput) episodeRankInput.value = String(rank);
+    if (episodeJumpStatus) episodeJumpStatus.textContent = `正在查找第 ${rank} 条可审核 episode...`;
+    const response = await fetch(`/api/mediapipe/clips/next?start_rank=${encodeURIComponent(rank)}`);
+    const data = await parseJsonResponse(response);
+    if (!response.ok || !data.success) {
+      if (episodeJumpStatus) episodeJumpStatus.textContent = data.message || "跳转失败";
+      return;
+    }
+    if (!data.clip_id) {
+      if (episodeJumpStatus) episodeJumpStatus.textContent = `当前没有第 ${rank} 条可审核 episode。`;
+      return;
+    }
+    if (episodeJumpStatus) episodeJumpStatus.textContent = `正在打开第 ${rank} 条可审核 episode: clip ${data.clip_id}`;
+    await loadClip(Number(data.clip_id), { pushUrl: true, startRankValue: rank });
+    if (episodeJumpStatus) episodeJumpStatus.textContent = `已打开第 ${rank} 条可审核 episode: clip ${data.clip_id}`;
   }
 
   function canvasPointToOrig(event) {
@@ -572,6 +756,22 @@ if (reviewNode) {
   rightUnusableButton.onclick = () => setSideUnusable("right");
   leftManualButton.onclick = () => beginManualBox("left");
   rightManualButton.onclick = () => beginManualBox("right");
+  if (episodeRankGoButton) {
+    episodeRankGoButton.onclick = () => {
+      jumpToEpisodeRank(episodeRankInput?.value).catch((error) => {
+        if (episodeJumpStatus) episodeJumpStatus.textContent = String(error);
+      });
+    };
+  }
+  if (episodeRankInput) {
+    episodeRankInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      jumpToEpisodeRank(episodeRankInput.value).catch((error) => {
+        if (episodeJumpStatus) episodeJumpStatus.textContent = String(error);
+      });
+    });
+  }
   if (jumpGoButton) {
     jumpGoButton.onclick = () => jumpToReviewFrame(jumpInput?.value);
   }
@@ -626,31 +826,17 @@ if (reviewNode) {
   });
 
   window.addEventListener("resize", () => drawOverlay());
+  window.addEventListener("popstate", () => {
+    const match = window.location.pathname.match(/\/mediapipe\/clip\/(\d+)$/);
+    if (!match) return;
+    const nextRank = Math.max(1, Number(new URL(window.location.href).searchParams.get("start_rank") || currentStartRank || 1));
+    loadClip(Number(match[1]), { pushUrl: false, startRankValue: nextRank }).catch((error) => {
+      titleNode.textContent = String(error);
+    });
+  });
 
   async function boot() {
-    const response = await fetch(`/api/mediapipe/clips/${clipId}`);
-    const data = await response.json();
-    if (!response.ok || !data.success) {
-      titleNode.textContent = data.message || "加载失败";
-      return;
-    }
-    bundle = data.bundle;
-    if (!bundle) {
-      titleNode.textContent = "这个 episode 还没有可用的 bundle。";
-      return;
-    }
-    (bundle.frames || []).forEach((item) => {
-      frameMetaByFrameIdx.set(Number(item.frame_idx), item);
-    });
-    (bundle.frame_proposals || []).forEach((item) => {
-      frameProposalsByFrameIdx.set(Number(item.frame_idx), item);
-    });
-    titleNode.textContent = `${bundle.episode_name} · 全 episode · ${Number(bundle.num_frames || 0)} 帧`;
-    subtitleNode.textContent = `${bundle.dirty_reason} · ${getReviewFrames().length} 个审核帧`;
-    hydrateFromExistingReview(data.clip?.review_payload_json);
-    const firstPending = getReviewFrames().findIndex((frame) => !ensureReviewEntry(frame)?.confirmed);
-    currentReviewFrameIndex = firstPending >= 0 ? firstPending : 0;
-    selectReviewFrame(currentReviewFrameIndex);
+    await loadClip(currentClipId, { pushUrl: false, startRankValue: currentStartRank });
   }
 
   boot().catch((error) => {
