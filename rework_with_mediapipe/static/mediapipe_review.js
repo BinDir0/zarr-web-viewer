@@ -24,6 +24,9 @@ function renderSummary(summary) {
       if (startLink) {
         startLink.href = `/mediapipe/clip/${summary.next_clip_id}?start_rank=${startRank}`;
         startLink.textContent = `打开第 ${startRank} 条 Episode ${summary.next_clip_id}`;
+        startLink.dataset.clipId = String(summary.next_clip_id);
+        startLink.dataset.startRank = String(startRank);
+        startLink.dataset.loading = "0";
         startLink.style.display = "";
       }
       if (startEmpty) startEmpty.style.display = "none";
@@ -31,7 +34,7 @@ function renderSummary(summary) {
       if (startLink) startLink.style.display = "none";
       if (startEmpty) startEmpty.style.display = "";
       if (startEmpty) {
-        startEmpty.textContent = `从第 ${startRank} 条开始时，当前没有可审核 episode`;
+        startEmpty.textContent = `从第 ${startRank} 条开始时，当前没有已预处理 episode`;
       }
     }
   }
@@ -49,6 +52,8 @@ async function fetchSummary(startRank = 1, requestSeq = null) {
 
 if (dashboardNode) {
   const startRankInput = document.getElementById("mpr-start-rank");
+  const startLink = document.getElementById("mpr-start-link");
+  const startEmpty = document.getElementById("mpr-start-empty");
   fetchSummary.latestRequestSeq = 0;
   const refreshSummary = () => {
     const startRank = Math.max(1, Number(startRankInput?.value || 1));
@@ -58,9 +63,45 @@ if (dashboardNode) {
     const nextUrl = new URL(window.location.href);
     nextUrl.searchParams.set("start_rank", String(startRank));
     window.history.replaceState({}, "", nextUrl);
+    if (startLink) {
+      startLink.href = "#";
+      startLink.textContent = `查找第 ${startRank} 条 Episode...`;
+      startLink.dataset.loading = "1";
+      startLink.style.display = "";
+    }
+    if (startEmpty) startEmpty.style.display = "none";
     fetchSummary.latestRequestSeq += 1;
     return fetchSummary(startRank, fetchSummary.latestRequestSeq);
   };
+  async function openCurrentStartRank() {
+    const startRank = Math.max(1, Number(startRankInput?.value || 1));
+    if (startLink) {
+      startLink.textContent = `打开第 ${startRank} 条 Episode...`;
+      startLink.dataset.loading = "1";
+    }
+    const response = await fetch(`/api/mediapipe/clips/next?start_rank=${encodeURIComponent(startRank)}`);
+    const data = await response.json();
+    if (!response.ok || !data.success || !data.clip_id) {
+      if (startLink) startLink.style.display = "none";
+      if (startEmpty) {
+        startEmpty.textContent = `从第 ${startRank} 条开始时，当前没有已预处理 episode`;
+        startEmpty.style.display = "";
+      }
+      return;
+    }
+    window.location.href = `/mediapipe/clip/${data.clip_id}?start_rank=${startRank}`;
+  }
+  if (startLink) {
+    startLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      openCurrentStartRank().catch((error) => {
+        if (startEmpty) {
+          startEmpty.textContent = String(error);
+          startEmpty.style.display = "";
+        }
+      });
+    });
+  }
   if (startRankInput) {
     startRankInput.addEventListener("input", () => {
       refreshSummary().catch((error) => console.error(error));
@@ -196,24 +237,90 @@ if (reviewNode) {
     const src = frameAssetUrl(frame);
     let cached = imagePreloadCache.get(src);
     if (cached) return cached;
-    const img = new Image();
-    img.decoding = "async";
-    img.loading = "eager";
-    const promise = new Promise((resolve, reject) => {
-      img.onload = async () => {
-        try {
-          if (img.decode) await img.decode();
-        } catch (error) {
-          // Some browsers reject decode() for already-decoded cached images.
-        }
-        resolve(img);
-      };
-      img.onerror = reject;
-    });
-    cached = { img, promise };
+    cached = {
+      src,
+      displaySrc: src,
+      img: null,
+      objectUrl: null,
+      promise: null,
+    };
+    cached.promise = fetch(src, { cache: "force-cache" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.blob();
+      })
+      .then(
+        (blob) =>
+          new Promise((resolve, reject) => {
+            const img = new Image();
+            const objectUrl = URL.createObjectURL(blob);
+            img.decoding = "async";
+            img.loading = "eager";
+            img.onload = async () => {
+              try {
+                if (img.decode) await img.decode();
+              } catch (error) {
+                // Some browsers reject decode() for already-decoded cached images.
+              }
+              cached.img = img;
+              cached.objectUrl = objectUrl;
+              cached.displaySrc = objectUrl;
+              resolve(cached);
+            };
+            img.onerror = reject;
+            img.src = objectUrl;
+          })
+      )
+      .catch(
+        () =>
+          new Promise((resolve, reject) => {
+            const img = new Image();
+            img.decoding = "async";
+            img.loading = "eager";
+            img.onload = async () => {
+              try {
+                if (img.decode) await img.decode();
+              } catch (error) {
+                // Some browsers reject decode() for already-decoded cached images.
+              }
+              cached.img = img;
+              cached.displaySrc = src;
+              resolve(cached);
+            };
+            img.onerror = reject;
+            img.src = src;
+          })
+      );
     imagePreloadCache.set(src, cached);
-    img.src = src;
     return cached;
+  }
+
+  function setFrameImageSource(frame, cached) {
+    const src = frameAssetUrl(frame);
+    const displaySrc = cached?.displaySrc || src;
+    frameImage.dataset.src = src;
+    frameImage.onload = () => {
+      if (frameImage.dataset.src === src) drawOverlay();
+    };
+    if (frameImage.src !== displaySrc) {
+      frameImage.src = displaySrc;
+    } else if (frameImage.complete) {
+      drawOverlay();
+    }
+    cached?.promise
+      ?.then((entry) => {
+        if (frameImage.dataset.src !== src) return;
+        if (entry.displaySrc && frameImage.src !== entry.displaySrc) {
+          frameImage.src = entry.displaySrc;
+          return;
+        }
+        try {
+          if (frameImage.complete) drawOverlay();
+        } catch (error) {
+          // drawOverlay is guarded by image completeness.
+        }
+      })
+      .catch(() => {});
   }
 
   function warmImageWindow(centerIndex, radius = 6) {
@@ -254,18 +361,7 @@ if (reviewNode) {
       drawOverlay();
       return;
     }
-    frameImage.dataset.src = src;
-    frameImage.onload = () => {
-      if (frameImage.dataset.src === src) drawOverlay();
-    };
-    if (cached?.promise) {
-      cached.promise
-        .then(() => {
-          if (frameImage.dataset.src === src) drawOverlay();
-        })
-        .catch(() => {});
-    }
-    frameImage.src = src;
+    setFrameImageSource(frame, cached);
   }
 
   function getProposalList(frameIdx) {
@@ -652,7 +748,7 @@ if (reviewNode) {
     if (!Number.isFinite(parsed)) return;
     const rank = Math.max(1, Math.trunc(parsed));
     if (episodeRankInput) episodeRankInput.value = String(rank);
-    if (episodeJumpStatus) episodeJumpStatus.textContent = `正在查找第 ${rank} 条可审核 episode...`;
+    if (episodeJumpStatus) episodeJumpStatus.textContent = `正在查找第 ${rank} 条 episode...`;
     const response = await fetch(`/api/mediapipe/clips/next?start_rank=${encodeURIComponent(rank)}`);
     const data = await parseJsonResponse(response);
     if (!response.ok || !data.success) {
@@ -660,12 +756,12 @@ if (reviewNode) {
       return;
     }
     if (!data.clip_id) {
-      if (episodeJumpStatus) episodeJumpStatus.textContent = `当前没有第 ${rank} 条可审核 episode。`;
+      if (episodeJumpStatus) episodeJumpStatus.textContent = `当前没有第 ${rank} 条已预处理 episode。`;
       return;
     }
-    if (episodeJumpStatus) episodeJumpStatus.textContent = `正在打开第 ${rank} 条可审核 episode: clip ${data.clip_id}`;
+    if (episodeJumpStatus) episodeJumpStatus.textContent = `正在打开第 ${rank} 条 episode: clip ${data.clip_id}`;
     await loadClip(Number(data.clip_id), { pushUrl: true, startRankValue: rank });
-    if (episodeJumpStatus) episodeJumpStatus.textContent = `已打开第 ${rank} 条可审核 episode: clip ${data.clip_id}`;
+    if (episodeJumpStatus) episodeJumpStatus.textContent = `已打开第 ${rank} 条 episode: clip ${data.clip_id}`;
   }
 
   function canvasPointToOrig(event) {

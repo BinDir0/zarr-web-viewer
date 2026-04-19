@@ -72,11 +72,11 @@
             <div id="mpr-strip-summary" class="mpr-meta-note"></div>
           </div>
           <div class="mpr-jump-row">
-            <label class="mpr-jump-label" for="mpr-episode-rank-input">跳到第 N 条可审核 Episode</label>
+            <label class="mpr-jump-label" for="mpr-episode-rank-input">跳到第 N 条 Episode</label>
             <input id="mpr-episode-rank-input" class="mpr-rank-input mpr-jump-input" type="number" min="1" step="1" value="{{ start_rank }}">
             <button id="mpr-episode-rank-go" class="mpr-btn mpr-btn-secondary" type="button">打开</button>
           </div>
-          <div id="mpr-episode-jump-status" class="mpr-meta-note">按当前 ready_for_review 队列排序；例如第 2 条会跳到第二个可审核 clip。</div>
+          <div id="mpr-episode-jump-status" class="mpr-meta-note">按已预处理 episode 的固定 id 顺序排序；已审核 episode 不会导致编号重排。</div>
           <div class="mpr-jump-row">
             <label class="mpr-jump-label" for="mpr-jump-input">跳到审核帧</label>
             <input id="mpr-jump-input" class="mpr-rank-input mpr-jump-input" type="number" min="1" step="1" value="1">

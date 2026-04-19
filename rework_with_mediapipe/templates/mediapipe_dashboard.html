@@ -25,7 +25,7 @@
             href="{{ url_for('mediapipe_review.clip_page', clip_id=summary.next_clip_id or 0, start_rank=start_rank) }}"
             {% if not summary.next_clip_id %}style="display:none"{% endif %}
           >打开第 {{ start_rank }} 条 Episode {{ summary.next_clip_id or "" }}</a>
-          <span id="mpr-start-empty" class="mpr-empty" {% if summary.next_clip_id %}style="display:none"{% endif %}>从第 {{ start_rank }} 条开始时，当前没有可审核 episode</span>
+          <span id="mpr-start-empty" class="mpr-empty" {% if summary.next_clip_id %}style="display:none"{% endif %}>从第 {{ start_rank }} 条开始时，当前没有已预处理 episode</span>
         </div>
       </section>
 
@@ -46,7 +46,7 @@
       <section class="mpr-card">
         <h2>审核说明</h2>
         <div class="mpr-instructions">
-          <div>1. 先在右上角填“从第几条开始”，再点“打开”。这里的顺序按当前可审核 episode 的 id 顺序计算；例如第 1 条是 clip1、第 2 条是 clip3，则输入 2 会打开 clip3。</div>
+          <div>1. 先在右上角填“从第几条开始”，再点“打开”。这里的顺序按已预处理 episode 的固定 id 顺序计算；审完的 episode 不会导致编号重排。</div>
           <div>2. 一个 side 可以归并多个 Track；不属于 wearer 的手直接忽略。</div>
           <div>3. 如果画面里能看到手，但没有任何候选框，请勾该侧 <code>可见但缺框</code>。</div>
           <div>4. 提交后会继续跳到当前 episode 后面的下一条 ready episode，不会再跳回队首。</div>

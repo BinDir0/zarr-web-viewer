@@ -4,14 +4,14 @@ import importlib.util
 import json
 from typing import Any, Dict, List, Optional
 
-from flask import Blueprint, abort, jsonify, render_template, request, send_from_directory
+from flask import Blueprint, jsonify, render_template, request, send_from_directory
 
 from .config import MediaPipeReviewConfig, load_config
 from .db import (
     count_clips_by_status,
     get_clip,
-    get_clip_by_status_offset,
     get_next_clip_by_status_after_id,
+    get_preprocessed_clip_by_offset,
     list_clips_by_statuses,
     list_fit_jobs,
     open_db,
@@ -70,9 +70,8 @@ def _dependency_status(cfg: MediaPipeReviewConfig) -> Dict[str, Any]:
 def _summary_payload(cfg: MediaPipeReviewConfig, *, start_rank: int = 1) -> Dict[str, Any]:
     with open_db(cfg.db_path) as conn:
         counts = count_clips_by_status(conn, min_num_frames=cfg.min_export_episode_frames)
-        start_clip = get_clip_by_status_offset(
+        start_clip = get_preprocessed_clip_by_offset(
             conn,
-            "ready_for_review",
             offset=max(0, int(start_rank) - 1),
             min_num_frames=cfg.min_export_episode_frames,
         )
@@ -273,9 +272,8 @@ def api_next_clip():
                 min_num_frames=cfg.min_export_episode_frames,
             )
         else:
-            row = get_clip_by_status_offset(
+            row = get_preprocessed_clip_by_offset(
                 conn,
-                "ready_for_review",
                 offset=max(0, start_rank - 1),
                 min_num_frames=cfg.min_export_episode_frames,
             )
