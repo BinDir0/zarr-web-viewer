@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import sqlite3
+from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, jsonify, render_template, request, send_from_directory
@@ -28,6 +30,8 @@ mediapipe_review_bp = Blueprint(
 
 _CFG: Optional[MediaPipeReviewConfig] = None
 _PREPROCESSED_RANK_CACHE: Dict[tuple[str, int], Dict[str, Any]] = {}
+_COMPACT_BUNDLE_CACHE: OrderedDict[tuple[str, int, int], Dict[str, Any]] = OrderedDict()
+_COMPACT_BUNDLE_CACHE_MAX = 128
 
 
 def _parse_start_rank(raw_value: Any) -> int:
@@ -161,13 +165,37 @@ def _load_bundle(cfg: MediaPipeReviewConfig, bundle_relpath: str) -> Dict[str, A
         return json.load(f)
 
 
+def _compact_bundle_cache_key(bundle_path: Path) -> tuple[str, int, int]:
+    stat = bundle_path.stat()
+    return (str(bundle_path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _load_compact_bundle(cfg: MediaPipeReviewConfig, bundle_relpath: str) -> Dict[str, Any]:
+    bundle_path = cfg.artifact_abspath(bundle_relpath) / "bundle.json"
+    cache_key = _compact_bundle_cache_key(bundle_path)
+    cached = _COMPACT_BUNDLE_CACHE.get(cache_key)
+    if cached is not None:
+        _COMPACT_BUNDLE_CACHE.move_to_end(cache_key)
+        return cached
+    with bundle_path.open("r", encoding="utf-8") as f:
+        bundle = json.load(f)
+    compact = _compact_bundle_for_review(bundle)
+    _COMPACT_BUNDLE_CACHE[cache_key] = compact
+    _COMPACT_BUNDLE_CACHE.move_to_end(cache_key)
+    while len(_COMPACT_BUNDLE_CACHE) > _COMPACT_BUNDLE_CACHE_MAX:
+        _COMPACT_BUNDLE_CACHE.popitem(last=False)
+    return compact
+
+
 def _compact_bundle_for_review(bundle: Dict[str, Any]) -> Dict[str, Any]:
     if int(bundle.get("bundle_version", 0)) != 3:
         raise ValueError(f"Unsupported bundle_version: {bundle.get('bundle_version')}")
     review_frames = list(bundle.get("review_frames", []))
     review_indices = {int(item["frame_idx"]) for item in review_frames}
-    frame_map = {int(item["frame_idx"]): item for item in bundle.get("frames", [])}
-    proposal_map = {int(item["frame_idx"]): item for item in bundle.get("frame_proposals", [])}
+    frames = [item for item in bundle.get("frames", []) if int(item["frame_idx"]) in review_indices]
+    frame_proposals = [item for item in bundle.get("frame_proposals", []) if int(item["frame_idx"]) in review_indices]
+    frames.sort(key=lambda item: int(item["frame_idx"]))
+    frame_proposals.sort(key=lambda item: int(item["frame_idx"]))
     return {
         "bundle_version": 3,
         "clip_id": bundle.get("clip_id"),
@@ -182,8 +210,8 @@ def _compact_bundle_for_review(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "dirty_frame_indices": list(bundle.get("dirty_frame_indices", [])),
         "detector_meta": dict(bundle.get("detector_meta", {})),
         "review_frames": review_frames,
-        "frames": [frame_map[frame_idx] for frame_idx in sorted(review_indices) if frame_idx in frame_map],
-        "frame_proposals": [proposal_map[frame_idx] for frame_idx in sorted(review_indices) if frame_idx in proposal_map],
+        "frames": frames,
+        "frame_proposals": frame_proposals,
     }
 
 
@@ -335,14 +363,30 @@ def api_next_clip():
 def api_clip(clip_id: int):
     cfg = init_runtime()
     with open_db(cfg.db_path) as conn:
-        clip = get_clip(conn, clip_id)
+        row = conn.execute(
+            """
+            SELECT id, status, bundle_relpath, review_payload_json
+            FROM clips
+            WHERE id = ?
+            """,
+            (clip_id,),
+        ).fetchone()
+        clip = (
+            {
+                "id": int(row["id"]),
+                "status": str(row["status"]),
+                "bundle_relpath": str(row["bundle_relpath"] or ""),
+                "review_payload_json": json.loads(str(row["review_payload_json"] or "{}")),
+            }
+            if row is not None
+            else None
+        )
     if clip is None:
         return jsonify({"success": False, "message": f"Unknown clip_id: {clip_id}"}), 404
     if not clip.get("bundle_relpath"):
         return jsonify({"success": True, "clip": clip, "bundle": None})
     try:
-        bundle = _load_bundle(cfg, clip["bundle_relpath"])
-        compact_bundle = _compact_bundle_for_review(bundle)
+        compact_bundle = _load_compact_bundle(cfg, clip["bundle_relpath"])
     except Exception as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
     return jsonify({"success": True, "clip": clip, "bundle": compact_bundle})
