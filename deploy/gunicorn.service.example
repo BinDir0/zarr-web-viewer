@@ -1,0 +1,16 @@
+[Unit]
+Description=Zarr Viewer Gunicorn Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/zarr-viewer
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/env bash -lc 'python3 -m gunicorn -w 4 --threads 8 --timeout 120 --bind 0.0.0.0:9475 wsgi:application'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

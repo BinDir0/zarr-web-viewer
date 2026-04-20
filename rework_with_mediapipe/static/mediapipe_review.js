@@ -55,26 +55,50 @@ if (dashboardNode) {
   const startLink = document.getElementById("mpr-start-link");
   const startEmpty = document.getElementById("mpr-start-empty");
   fetchSummary.latestRequestSeq = 0;
+  let refreshSummaryTimer = null;
+  const currentStartRank = () => Math.max(1, Number(startRankInput?.value || 1));
+  const updateStartRankUrl = (startRank) => {
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("start_rank", String(startRank));
+    window.history.replaceState({}, "", nextUrl);
+  };
+  const setPendingStartLink = (startRank) => {
+    if (!startLink) return;
+    startLink.href = "#";
+    startLink.textContent = `打开第 ${startRank} 条 Episode`;
+    startLink.dataset.loading = "0";
+    startLink.style.display = "";
+    if (startEmpty) startEmpty.style.display = "none";
+  };
   const refreshSummary = () => {
     const startRank = Math.max(1, Number(startRankInput?.value || 1));
     if (startRankInput) {
       startRankInput.value = String(startRank);
     }
-    const nextUrl = new URL(window.location.href);
-    nextUrl.searchParams.set("start_rank", String(startRank));
-    window.history.replaceState({}, "", nextUrl);
-    if (startLink) {
-      startLink.href = "#";
-      startLink.textContent = `查找第 ${startRank} 条 Episode...`;
-      startLink.dataset.loading = "1";
-      startLink.style.display = "";
-    }
-    if (startEmpty) startEmpty.style.display = "none";
+    updateStartRankUrl(startRank);
+    setPendingStartLink(startRank);
     fetchSummary.latestRequestSeq += 1;
     return fetchSummary(startRank, fetchSummary.latestRequestSeq);
   };
+  const scheduleSummaryRefresh = () => {
+    const startRank = currentStartRank();
+    if (startRankInput) startRankInput.value = String(startRank);
+    updateStartRankUrl(startRank);
+    setPendingStartLink(startRank);
+    if (refreshSummaryTimer !== null) {
+      window.clearTimeout(refreshSummaryTimer);
+    }
+    refreshSummaryTimer = window.setTimeout(() => {
+      refreshSummaryTimer = null;
+      refreshSummary().catch((error) => console.error(error));
+    }, 300);
+  };
   async function openCurrentStartRank() {
-    const startRank = Math.max(1, Number(startRankInput?.value || 1));
+    const startRank = currentStartRank();
+    if (refreshSummaryTimer !== null) {
+      window.clearTimeout(refreshSummaryTimer);
+      refreshSummaryTimer = null;
+    }
     if (startLink) {
       startLink.textContent = `打开第 ${startRank} 条 Episode...`;
       startLink.dataset.loading = "1";
@@ -104,10 +128,10 @@ if (dashboardNode) {
   }
   if (startRankInput) {
     startRankInput.addEventListener("input", () => {
-      refreshSummary().catch((error) => console.error(error));
+      scheduleSummaryRefresh();
     });
     startRankInput.addEventListener("change", () => {
-      refreshSummary().catch((error) => console.error(error));
+      scheduleSummaryRefresh();
     });
   }
   refreshSummary().catch((error) => console.error(error));

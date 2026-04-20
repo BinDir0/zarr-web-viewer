@@ -99,8 +99,27 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     _ensure_column(conn, "vendor_reviews", "review_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(conn, "clips", "review_unit", "TEXT NOT NULL DEFAULT 'clip'")
+    _ensure_indexes(conn)
     _backfill_clip_review_units(conn)
     conn.commit()
+
+
+def _ensure_indexes(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_clips_preprocessed_episode_rank
+        ON clips(id)
+        WHERE bundle_relpath IS NOT NULL
+          AND review_unit = 'episode'
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_clips_status_episode_rank
+        ON clips(status, id)
+        WHERE review_unit = 'episode'
+        """
+    )
 
 
 def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:

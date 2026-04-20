@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, jsonify, render_template, request, send_from_directory
@@ -11,7 +12,6 @@ from .db import (
     count_clips_by_status,
     get_clip,
     get_next_clip_by_status_after_id,
-    get_preprocessed_clip_by_offset,
     list_clips_by_statuses,
     list_fit_jobs,
     open_db,
@@ -27,6 +27,7 @@ mediapipe_review_bp = Blueprint(
 )
 
 _CFG: Optional[MediaPipeReviewConfig] = None
+_PREPROCESSED_RANK_CACHE: Dict[tuple[str, int], Dict[str, Any]] = {}
 
 
 def _parse_start_rank(raw_value: Any) -> int:
@@ -67,14 +68,62 @@ def _dependency_status(cfg: MediaPipeReviewConfig) -> Dict[str, Any]:
     }
 
 
+def _preprocessed_rank_signature(conn: sqlite3.Connection, min_num_frames: int) -> tuple[int, int, int]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS n,
+            COALESCE(MAX(id), 0) AS max_id,
+            COALESCE(SUM(id), 0) AS sum_id
+        FROM clips
+        WHERE bundle_relpath IS NOT NULL
+          AND review_unit = 'episode'
+          AND num_frames >= ?
+        """,
+        (max(0, int(min_num_frames)),),
+    ).fetchone()
+    return int(row["n"]), int(row["max_id"]), int(row["sum_id"])
+
+
+def _preprocessed_rank_ids(conn: sqlite3.Connection, cfg: MediaPipeReviewConfig) -> List[int]:
+    min_num_frames = int(cfg.min_export_episode_frames)
+    cache_key = (str(cfg.db_path), min_num_frames)
+    signature = _preprocessed_rank_signature(conn, min_num_frames)
+    cached = _PREPROCESSED_RANK_CACHE.get(cache_key)
+    if cached and cached.get("signature") == signature:
+        return list(cached["ids"])
+    rows = conn.execute(
+        """
+        SELECT id
+        FROM clips
+        WHERE bundle_relpath IS NOT NULL
+          AND review_unit = 'episode'
+          AND num_frames >= ?
+        ORDER BY id
+        """,
+        (max(0, min_num_frames),),
+    ).fetchall()
+    ids = [int(row["id"]) for row in rows]
+    _PREPROCESSED_RANK_CACHE[cache_key] = {"signature": signature, "ids": ids}
+    return ids
+
+
+def _preprocessed_clip_by_rank(
+    conn: sqlite3.Connection,
+    cfg: MediaPipeReviewConfig,
+    start_rank: int,
+) -> Optional[sqlite3.Row]:
+    ids = _preprocessed_rank_ids(conn, cfg)
+    index = max(0, int(start_rank) - 1)
+    if index >= len(ids):
+        return None
+    return conn.execute("SELECT * FROM clips WHERE id = ?", (ids[index],)).fetchone()
+
+
 def _summary_payload(cfg: MediaPipeReviewConfig, *, start_rank: int = 1) -> Dict[str, Any]:
     with open_db(cfg.db_path) as conn:
         counts = count_clips_by_status(conn, min_num_frames=cfg.min_export_episode_frames)
-        start_clip = get_preprocessed_clip_by_offset(
-            conn,
-            offset=max(0, int(start_rank) - 1),
-            min_num_frames=cfg.min_export_episode_frames,
-        )
+        start_clip = _preprocessed_clip_by_rank(conn, cfg, start_rank)
         reviewed = list_clips_by_statuses(
             conn,
             ["reviewed_ready_for_fit", "fit_ok", "exported"],
@@ -272,11 +321,7 @@ def api_next_clip():
                 min_num_frames=cfg.min_export_episode_frames,
             )
         else:
-            row = get_preprocessed_clip_by_offset(
-                conn,
-                offset=max(0, start_rank - 1),
-                min_num_frames=cfg.min_export_episode_frames,
-            )
+            row = _preprocessed_clip_by_rank(conn, cfg, start_rank)
     return jsonify(
         {
             "success": True,
